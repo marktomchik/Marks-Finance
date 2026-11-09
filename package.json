@@ -1,0 +1,20 @@
+{
+  "name": "mark-finance",
+  "version": "1.0.0",
+  "description": "Offline personal finance dashboard for Obsidian, reading a lightweight JSON file from the vault.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "dev": "node esbuild.config.mjs",
+    "build": "tsc --noEmit && node esbuild.config.mjs production",
+    "install-vault": "node esbuild.config.mjs production && node install.mjs"
+  },
+  "author": "Mark Lysak",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "esbuild": "0.21.5",
+    "obsidian": "1.6.6",
+    "typescript": "5.4.5"
+  }
+}

@@ -1,0 +1,31 @@
+# Dependencies
+node_modules/
+
+# Build output (attached to GitHub Releases instead)
+main.js
+*.js.map
+
+# Obsidian per-vault data
+data.json
+
+# Real finance data must never be committed
+finance-data.json
+finance_data_*.json
+finance_transactions_*.csv
+*.heic
+*.HEIC
+*.jpg
+*.jpeg
+*.webp
+*.pdf
+
+# Secrets and local env
+.env
+.env.*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+.claude/
