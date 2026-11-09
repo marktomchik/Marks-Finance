@@ -174,3 +174,10 @@ const fmt = new Intl.NumberFormat("uk-UA", { minimumFractionDigits: 2, maximumFr
 export const money = (n: number, cur = "zł"): string => `${fmt.format(n)} ${cur}`;
 export const MONTHS_UA = ["січ", "лют", "бер", "кві", "тра", "чер", "лип", "сер", "вер", "жов", "лис", "гру"];
 export const monthLabel = (m: string): string => `${MONTHS_UA[Number(m.slice(5, 7)) - 1]} ${m.slice(2, 4)}`;
+
+export const CATEGORY_ICONS: Record<string, string> = {
+  groceries: "shopping-cart", housing: "home", transfers: "arrow-left-right", fuel: "fuel",
+  electronics: "laptop", household: "spray-can", education: "graduation-cap", subscriptions: "repeat",
+  dining: "utensils", transport: "bus", travel: "plane", car: "car", entertainment: "gamepad-2",
+  health: "heart-pulse", clothing: "shirt", telecom: "smartphone", taxes: "landmark", other: "circle-dot",
+};

@@ -1,13 +1,15 @@
 # Фінанси Марка (Obsidian plugin)
 
 Offline personal finance dashboard for Obsidian (desktop and Android).
+Mobile-first (Android, narrow screens): month switcher with swipe, bottom navigation, card lists, large touch targets. Looks fine on desktop too (centered column).
+
 It reads one lightweight JSON file from the vault and shows:
 
-- **Огляд**: spend / income / balance, monthly bar chart, card vs cash, categories (tap one to see its operations), latest operations.
-- **Операції**: search, filter by category and direction, paginated list (light on mobile memory).
+- **Огляд**: spend with change vs previous period, income, balance, monthly chart (tap a month to open it), categories (tap one to see its operations), card vs cash, latest operations.
+- **Операції**: search, filter chips (spend / income / category), list grouped by day with day totals, paginated to keep memory low.
 - **Звірка** (reconciliation): possible duplicates, cash receipts that look like card payments, receipts without a bank operation, big spends without a receipt, uncategorised items, gaps between months.
 
-Every total is recomputed from the `transactions` array, so the period picker (all time, month, year, custom range) works offline.
+Period: month (swipe left/right or arrows), year, all time, custom range. Every total is recomputed from the `transactions` array, so the period picker (all time, month, year, custom range) works offline.
 
 ## Data file
 
