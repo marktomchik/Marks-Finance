@@ -53,7 +53,7 @@ export class FinanceView extends ItemView {
     try {
       this.data = await this.plugin.loadFinance();
       this.error = "";
-      const last = this.data.transactions[0]?.date.slice(0, 7);
+      const last = this.lastDataMonth();
       if (!this.anchor || (last && this.anchor > last)) this.anchor = last || new Date().toISOString().slice(0, 7);
     } catch (e) {
       this.data = null;
@@ -88,6 +88,7 @@ export class FinanceView extends ItemView {
     return (this.data?.transactions ?? []).filter((t) => t.date >= a && t.date <= b);
   }
   private step(dir: 1 | -1): void {
+    if (dir > 0 && !this.canStepForward()) return;
     if (this.mode === "month") this.anchor = dir > 0 ? nextMonth(this.anchor) : prevMonth(this.anchor);
     else if (this.mode === "year") this.anchor = `${Number(this.anchor.slice(0, 4)) + dir}${this.anchor.slice(4)}`;
     else return;
@@ -119,11 +120,11 @@ export class FinanceView extends ItemView {
 
     const [a, b] = this.range();
     const txs = this.filter(a, b);
+    if (txs.length === 0 && this.renderNoDataHint(this.scrollEl)) { if (keepScroll) this.scrollEl.scrollTop = keepScroll; return; }
     if (this.tab === "overview") this.renderOverview(txs);
     else if (this.tab === "transactions") this.renderTransactions(txs);
     else this.renderReconcile(txs);
 
-    this.renderNav(root);
     if (keepScroll) this.scrollEl.scrollTop = keepScroll;
   }
 
@@ -141,8 +142,9 @@ export class FinanceView extends ItemView {
     label.onclick = () => { this.periodOpen = !this.periodOpen; this.render(); };
     const next = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Вперед" } });
     setIcon(next, "chevron-right");
-    next.disabled = !canStep;
+    next.disabled = !canStep || !this.canStepForward();
     next.onclick = () => this.step(1);
+    this.renderNav(head);
 
     if (this.periodOpen) {
       const panel = head.createDiv("mf-period-panel");
@@ -167,8 +169,36 @@ export class FinanceView extends ItemView {
     }
   }
 
+  /** Latest YYYY-MM that has at least one transaction. */
+  private lastDataMonth(): string {
+    let max = "";
+    for (const t of this.data?.transactions ?? []) if (t.date > max) max = t.date;
+    return max.slice(0, 7);
+  }
+
+  private canStepForward(): boolean {
+    const last = this.lastDataMonth();
+    if (!last) return true;
+    if (this.mode === "month") return this.anchor < last;
+    if (this.mode === "year") return this.anchor.slice(0, 4) < last.slice(0, 4);
+    return false;
+  }
+
+  /** Shown when the selected period has no transactions but data exists elsewhere. */
+  private renderNoDataHint(el: HTMLElement): boolean {
+    const last = this.lastDataMonth();
+    if (!last || (this.mode !== "month" && this.mode !== "year")) return false;
+    const box = el.createDiv("mf-empty");
+    const ic = box.createDiv("mf-empty-icon"); setIcon(ic, "calendar-x");
+    box.createEl("p", { text: `За ${this.periodLabel().toLowerCase()} операцій немає.` });
+    box.createEl("p", { cls: "mf-muted mf-small", text: `Останні дані — ${MONTHS_FULL[Number(last.slice(5)) - 1].toLowerCase()} ${last.slice(0, 4)}.` });
+    const b = box.createEl("button", { cls: "mod-cta", text: "До останніх даних" });
+    b.onclick = () => { this.mode = "month"; this.anchor = last; this.shown = PAGE; this.render(); };
+    return true;
+  }
+
   private renderNav(root: HTMLElement): void {
-    const nav = root.createDiv("mf-nav");
+    const nav = root.createDiv({ cls: "mf-nav", attr: { role: "tablist" } });
     const items: [Tab, string, string][] = [["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["reconcile", "Звірка", "check-circle"]];
     for (const [id, label, icon] of items) {
       const b = nav.createEl("button", { cls: id === this.tab ? "is-active" : "" });

@@ -1,4 +1,4 @@
-/* ===== Layout: header / scroll / bottom nav ===== */
+/* ===== Layout: header (period + tabs) / scroll ===== */
 .mf-root {
   --mf-radius: 16px;
   --mf-spend: var(--color-red);
@@ -60,20 +60,22 @@
 .mf-dates input { width: 100%; height: 40px; }
 .mf-panel-foot { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 
-/* ===== Bottom navigation ===== */
+/* ===== Tabs (top, segmented) — nothing at the bottom, so Obsidian's mobile toolbar can't cover them ===== */
 .mf-nav {
-  flex: none; display: flex; border-top: 1px solid var(--background-modifier-border);
-  background: var(--background-primary); padding: 4px 6px calc(4px + env(safe-area-inset-bottom, 0px));
+  display: flex; gap: 4px; margin-top: 8px; padding: 3px;
+  background: var(--background-secondary); border-radius: 12px;
 }
 .mf-nav button {
-  flex: 1; height: 56px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
-  background: transparent !important; box-shadow: none !important; color: var(--text-muted); border-radius: 12px; padding: 0;
+  flex: 1; min-width: 0; height: 38px; display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 6px;
+  background: transparent !important; box-shadow: none !important; color: var(--text-muted); border-radius: 9px; padding: 0 6px;
 }
-.mf-nav-icon { display: inline-flex; padding: 3px 16px; border-radius: 14px; }
-.mf-nav-icon svg { width: 20px; height: 20px; }
-.mf-nav-label { font-size: 11px; }
-.mf-nav button.is-active { color: var(--text-normal); font-weight: 600; }
-.mf-nav button.is-active .mf-nav-icon { background: color-mix(in srgb, var(--interactive-accent) 22%, transparent); color: var(--interactive-accent); }
+.mf-nav-icon { display: inline-flex; }
+.mf-nav-icon svg { width: 16px; height: 16px; }
+.mf-nav-label { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.mf-nav button.is-active { background: var(--background-primary) !important; color: var(--interactive-accent); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.25) !important; }
+
+/* Obsidian mobile draws a floating toolbar over the bottom of views: keep the last items scrollable above it. */
+.is-mobile .mf-scroll { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
 
 /* ===== Cards ===== */
 .mf-card { background: var(--background-secondary); border-radius: var(--mf-radius); padding: 14px; }
