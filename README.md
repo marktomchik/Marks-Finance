@@ -73,6 +73,21 @@ Keep receipt photos **out** of the synced folder: link them with `receiptUrl` so
 
 `tools/build-from-sheet.mjs` builds this file from table dumps of a Google Sheet (Transactions, Receipts, ReceiptItems, Categories, Loans, Notes, Plan) and fetches NBP rates.
 
+## Extensions API
+
+Other plugins can add a tab to the finance view and write plan lines into «План». The API is `app.plugins.plugins["mark-finance"].api` (version 1), and the workspace event `mark-finance:ready` announces it.
+
+- `registerTab({ id, title, icon, order?, render(containerEl, ctx) => cleanup? })` adds a tab next to the built-in ones.
+  - `ctx` is `{ month, currency, formatMoney(n), onMonthChange(cb) }`.
+  - `render` runs once. Month changes arrive through `onMonthChange`.
+- `unregisterTab(id)` removes the tab. Call it in your `onunload`.
+- `setPlanEntries(sourceId, entries)` replaces that source's plan lines.
+  - Each entry is `{ id, month: "YYYY-MM", kind: "income" | "expense", title, amount, currency: "PLN", status: "planned" | "confirmed", meta? }`.
+  - Lines are stored in `Фінанси/plan-external/<sourceId>.json` and shown in «План» with the source label. They stay visible when the extension is disabled.
+- `getPlanEntries(sourceId)` returns the stored lines.
+
+Full contract, lifecycle and an example: [EXTENSIONS.md](EXTENSIONS.md).
+
 ## Build and install
 
 ```bash

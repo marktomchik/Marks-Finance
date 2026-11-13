@@ -8,15 +8,18 @@ import {
   PlanItem, Note, loanSign, loanActive,
 } from "./data";
 import { PlanModal, NoteModal } from "./modals";
+import type { ExtensionTab } from "./extensions";
 
 export const VIEW_TYPE = "mark-finance-view";
-type Tab = "overview" | "transactions" | "plan" | "loans" | "notes" | "review";
+type BuiltinTab = "overview" | "transactions" | "plan" | "loans" | "notes" | "review";
+/** Built-in tab, or "ext:<id>" for a tab registered by an extension plugin. */
+type Tab = BuiltinTab | `ext:${string}`;
 type Mode = "month" | "year" | "all" | "custom";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const PAGE = 40;
 const MONTHS_FULL = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень", "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"];
 const WEEKDAYS = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-const TABS: [Tab, string, string][] = [
+const TABS: [BuiltinTab, string, string][] = [
   ["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["plan", "План", "target"],
   ["loans", "Борги", "hand-coins"], ["notes", "Нотатки", "sticky-note"], ["review", "Перевірка", "check-circle"],
 ];
@@ -41,6 +44,8 @@ export class FinanceView extends ItemView {
   private shown = PAGE;
   private detailCat = ""; // overview: category drill-down
   private scrollEl!: HTMLElement;
+  /** Mounted extension tab: its container survives re-renders (month changes), cleanup runs when it is left. */
+  private extMount: { id: string; el: HTMLElement; month: string; cleanup?: () => void; listeners: Set<(m: string) => void> } | null = null;
 
   constructor(leaf: WorkspaceLeaf, plugin: MarkFinancePlugin) {
     super(leaf);
@@ -65,7 +70,7 @@ export class FinanceView extends ItemView {
       this.applyCurrency();
       this.error = "";
       const last = this.lastDataMonth();
-      if (!this.anchor || (this.tab !== "plan" && last && this.anchor > last)) this.anchor = last || new Date().toISOString().slice(0, 7);
+      if (!this.anchor || (this.tab !== "plan" && !this.isExtTab() && last && this.anchor > last)) this.anchor = last || new Date().toISOString().slice(0, 7);
     } catch (e) {
       this.data = null;
       this.error = e instanceof Error ? e.message : String(e);
@@ -124,7 +129,7 @@ export class FinanceView extends ItemView {
   /** The plan tab may look ahead: up to the latest planned month or a year from today. */
   private lastAllowedMonth(): string {
     const last = this.lastDataMonth();
-    if (this.tab !== "plan") return last;
+    if (this.tab !== "plan" && !this.isExtTab()) return last;
     let m = new Date().toISOString().slice(0, 7);
     for (let i = 0; i < 12; i++) m = nextMonth(m);
     for (const p of this.local.plan) if (p.month > m) m = p.month;
@@ -154,7 +159,8 @@ export class FinanceView extends ItemView {
       b.onclick = () => void this.reload();
       return;
     }
-    if (this.tab === "plan" && this.mode !== "month") this.mode = "month";
+    if ((this.tab === "plan" || this.isExtTab()) && this.mode !== "month") this.mode = "month";
+    if (this.isExtTab() && !this.plugin.ext.tabs.has(this.tab.slice(4))) { this.unmountExt(); this.tab = "overview"; }
 
     this.renderHeader(root);
     this.scrollEl = root.createDiv("mf-scroll");
@@ -163,13 +169,15 @@ export class FinanceView extends ItemView {
 
     const [a, b] = this.range();
     const txs = this.filter(a, b);
-    const periodless = this.tab === "loans" || this.tab === "notes" || this.tab === "plan";
+    const periodless = this.tab === "loans" || this.tab === "notes" || this.tab === "plan" || this.isExtTab();
+    if (!this.isExtTab()) this.unmountExt();
     if (!periodless && txs.length === 0 && this.renderNoDataHint(this.scrollEl)) { if (keepScroll) this.scrollEl.scrollTop = keepScroll; return; }
     if (this.tab === "overview") { if (this.detailCat) this.renderCategoryDetail(txs, this.detailCat); else this.renderOverview(txs); }
     else if (this.tab === "transactions") this.renderTransactions(txs);
     else if (this.tab === "plan") this.renderPlan();
     else if (this.tab === "loans") this.renderLoans();
     else if (this.tab === "notes") this.renderNotes();
+    else if (this.isExtTab()) this.renderExtTab(this.plugin.ext.tabs.get(this.tab.slice(4))!);
     else this.renderReview(txs);
 
     if (keepScroll) this.scrollEl.scrollTop = keepScroll;
@@ -187,8 +195,9 @@ export class FinanceView extends ItemView {
       prev.onclick = () => this.step(-1);
       const label = row.createEl("button", { cls: "mf-period-label" });
       label.createSpan({ text: this.periodLabel() });
-      if (this.tab !== "plan") setIcon(label.createSpan("mf-caret"), this.periodOpen ? "chevron-up" : "chevron-down");
-      label.onclick = () => { if (this.tab === "plan") return; this.periodOpen = !this.periodOpen; this.render(); };
+      const monthOnly = this.tab === "plan" || this.isExtTab();
+      if (!monthOnly) setIcon(label.createSpan("mf-caret"), this.periodOpen ? "chevron-up" : "chevron-down");
+      label.onclick = () => { if (monthOnly) return; this.periodOpen = !this.periodOpen; this.render(); };
       const next = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Вперед" } });
       setIcon(next, "chevron-right");
       next.disabled = !canStep || !this.canStepForward();
@@ -196,7 +205,7 @@ export class FinanceView extends ItemView {
     }
     this.renderNav(head);
 
-    if (this.periodOpen && !periodless && this.tab !== "plan") {
+    if (this.periodOpen && !periodless && this.tab !== "plan" && !this.isExtTab()) {
       const panel = head.createDiv("mf-period-panel");
       const seg = panel.createDiv("mf-seg");
       const modes: [Mode, string][] = [["month", "Місяць"], ["year", "Рік"], ["all", "Весь час"], ["custom", "Період"]];
@@ -234,13 +243,15 @@ export class FinanceView extends ItemView {
 
   private renderNav(root: HTMLElement): void {
     const nav = root.createDiv({ cls: "mf-nav", attr: { role: "tablist" } });
-    for (const [id, label, icon] of TABS) {
+    const all: [Tab, string, string][] = [...TABS, ...this.plugin.ext.sortedTabs().map((t): [Tab, string, string] => [`ext:${t.id}`, t.title, t.icon])];
+    if (all.length > 6) nav.addClass("has-ext");
+    for (const [id, label, icon] of all) {
       const b = nav.createEl("button", { cls: id === this.tab ? "is-active" : "", attr: { role: "tab", "aria-label": label } });
       setIcon(b.createSpan("mf-nav-icon"), icon);
       b.createSpan({ cls: "mf-nav-label", text: label });
       b.onclick = () => {
         if (id === "overview" && this.tab === "overview") this.detailCat = "";
-        const leavingPlan = this.tab === "plan" && id !== "plan";
+        const leavingPlan = (this.tab === "plan" || this.isExtTab()) && id !== "plan" && !id.startsWith("ext:");
         this.tab = id; this.shown = PAGE; this.periodOpen = false;
         if (leavingPlan) { const last = this.lastDataMonth(); if (last && this.anchor > last) this.anchor = last; }
         this.render(); this.scrollEl.scrollTop = 0;
@@ -257,7 +268,7 @@ export class FinanceView extends ItemView {
       x0 = t.clientX; y0 = t.clientY; t0 = Date.now();
     }, { passive: true });
     el.addEventListener("touchend", (e) => {
-      if (!ok || this.tab === "loans" || this.tab === "notes") return;
+      if (!ok || this.tab === "loans" || this.tab === "notes" || this.isExtTab()) return;
       const t = e.changedTouches[0];
       const dx = t.clientX - x0, dy = t.clientY - y0;
       if (Math.abs(dx) > 70 && Math.abs(dy) < 45 && Date.now() - t0 < 600) this.step(dx < 0 ? 1 : -1);
@@ -498,6 +509,11 @@ export class FinanceView extends ItemView {
       return r2(v);
     };
     const items = this.local.plan.filter((p) => p.month === month);
+    const ext = this.plugin.ext.entriesFor(month).map((e) => ({
+      ...e, amountPln: r2(e.currency === "PLN" ? e.amount : new Converter("PLN", this.data!.fx).convert(e.amount, e.currency, `${month}-15`, this.data!.fx)),
+    }));
+    const extInc = ext.filter((e) => e.kind === "income"), extExp = ext.filter((e) => e.kind === "expense");
+    const extSum = (a: typeof ext) => r2(a.reduce((s, e) => s + e.amountPln, 0));
     const inc = items.filter((p) => p.kind === "income"), exp = items.filter((p) => p.kind === "expense");
     const sumP = (a: PlanItem[]) => r2(a.reduce((s, p) => s + p.amount, 0));
     const sumF = (a: PlanItem[], kind: "income" | "expense") => r2([...new Set(a.map((p) => p.category))].reduce((s, c) => s + fact(kind, c, month), 0));
@@ -505,18 +521,35 @@ export class FinanceView extends ItemView {
 
     const hero = el.createDiv("mf-card mf-hero");
     hero.createDiv({ cls: "mf-hero-label", text: `План на ${this.periodLabel().toLowerCase()}` });
-    const left = r2(sumP(inc) - sumP(exp));
+    const left = r2(sumP(inc) + extSum(extInc) - sumP(exp) - extSum(extExp));
     hero.createDiv({ cls: "mf-hero-value " + (left >= 0 ? "is-income" : "is-spend"), text: `${left >= 0 ? "+" : ""}${money(left, "zł")}` });
     hero.createDiv({ cls: "mf-muted mf-small", text: "Залишок за планом: доходи мінус витрати. План ведеться в злотих." });
     const sub = hero.createDiv("mf-hero-sub");
     const cell = (label: string, value: string, cls = "") => { const c = sub.createDiv("mf-hero-cell"); c.createDiv({ cls: "mf-muted mf-small", text: label }); c.createDiv({ cls: "mf-num " + cls, text: value }); };
-    cell("Доходи", money(sumP(inc), "zł"), "is-income");
-    cell("Витрати", money(sumP(exp), "zł"), "is-spend");
+    cell("Доходи", money(r2(sumP(inc) + extSum(extInc)), "zł"), "is-income");
+    cell("Витрати", money(r2(sumP(exp) + extSum(extExp)), "zł"), "is-spend");
     if (hasFacts) cell("Факт витрат", money(sumF(exp, "expense"), "zł"));
 
-    const section = (title: string, list: PlanItem[], kind: "income" | "expense") => {
+    const section = (title: string, list: PlanItem[], kind: "income" | "expense", extList: typeof ext) => {
       const card = this.card(title);
-      if (!list.length) card.createDiv({ cls: "mf-muted mf-small", text: "Ще нічого не заплановано." });
+      for (const e of extList) {
+        const row = card.createDiv("mf-plan-row mf-plan-ext");
+        const tab = this.plugin.ext.tabs.get(e.sourceId);
+        this.avatar(row, kind === "income" ? "income_ext" : "other", e.title);
+        const mid = row.createDiv("mf-cat-mid");
+        const top = mid.createDiv("mf-cat-top");
+        top.createDiv({ cls: "mf-cat-name", text: e.title || e.sourceId });
+        top.createDiv({ cls: "mf-num", text: money(e.amountPln, "zł") });
+        const meta = mid.createDiv({ cls: "mf-muted mf-small mf-tx-sub" });
+        meta.createSpan({ cls: "mf-tag mf-tag-src", text: tab?.title || e.sourceId });
+        meta.createSpan({ text: e.status === "confirmed" ? "підтверджено" : "очікується" });
+        if (e.currency !== "PLN") meta.createSpan({ text: money(e.amount, e.currency) });
+        row.onclick = () => {
+          if (tab) { this.tab = `ext:${tab.id}`; this.render(); this.scrollEl.scrollTop = 0; }
+          else new Notice(`Цей рядок веде доповнення «${e.sourceId}». Увімкніть його, щоб змінити.`);
+        };
+      }
+      if (!list.length && !extList.length) card.createDiv({ cls: "mf-muted mf-small", text: "Ще нічого не заплановано." });
       for (const p of list) {
         const row = card.createDiv("mf-plan-row");
         this.avatar(row, p.category || "other", p.name);
@@ -540,8 +573,8 @@ export class FinanceView extends ItemView {
       const add = card.createEl("button", { cls: "mf-link-btn", text: kind === "income" ? "+ Дохід" : "+ Витрата" });
       add.onclick = () => this.editPlan({ id: "", kind, name: "", category: kind === "income" ? "income_main" : "groceries", amount: 0, month });
     };
-    section("Доходи", inc, "income");
-    section("Витрати", exp, "expense");
+    section("Доходи", inc, "income", extInc);
+    section("Витрати", exp, "expense", extExp);
 
     // Spending categories this month that have no plan line.
     if (hasFacts) {
@@ -561,7 +594,7 @@ export class FinanceView extends ItemView {
     }
 
     const prev = this.local.plan.filter((p) => p.month === p1);
-    if (!items.length && prev.length) {
+    if (!items.length && !ext.length && prev.length) {
       const b = el.createEl("button", { cls: "mod-cta mf-wide", text: `Скопіювати план з ${MONTHS_FULL[Number(p1.slice(5)) - 1].toLowerCase()} (${prev.length})` });
       b.onclick = async () => {
         const copy = prev.map((p) => ({ ...p, id: newId("p"), month }));
@@ -586,6 +619,47 @@ export class FinanceView extends ItemView {
     await this.plugin.saveLocal(this.local);
     this.render();
   }
+
+  // ---------- extension tabs ----------
+  private isExtTab(): boolean { return this.tab.startsWith("ext:"); }
+
+  private renderExtTab(tab: ExtensionTab): void {
+    const m = this.extMount;
+    if (m && m.id === tab.id) {
+      this.scrollEl.appendChild(m.el); // keep the extension's DOM and state across re-renders
+      if (m.month !== this.anchor) { m.month = this.anchor; for (const cb of [...m.listeners]) { try { cb(this.anchor); } catch (e) { console.error(e); } } }
+      return;
+    }
+    this.unmountExt();
+    const el = createDiv({ cls: "mf-ext-host" });
+    this.scrollEl.appendChild(el);
+    const listeners = new Set<(m: string) => void>();
+    const mount: { id: string; el: HTMLElement; month: string; cleanup?: () => void; listeners: Set<(m: string) => void> } = { id: tab.id, el, month: this.anchor, listeners };
+    this.extMount = mount;
+    const ctx = {
+      get month() { return mount.month; },
+      currency: this.conv.target,
+      formatMoney: (n: number) => money(n, this.cur),
+      onMonthChange: (cb: (m: string) => void) => { listeners.add(cb); return () => { listeners.delete(cb); }; },
+    };
+    try {
+      const res = tab.render(el, ctx);
+      if (typeof res === "function") mount.cleanup = res;
+    } catch (e) {
+      el.createDiv({ cls: "mf-empty-inline", text: `Доповнення «${tab.title}» не змогло відкритися: ${e instanceof Error ? e.message : String(e)}` });
+    }
+  }
+
+  unmountExt(): void {
+    const m = this.extMount;
+    if (!m) return;
+    this.extMount = null;
+    m.listeners.clear();
+    try { m.cleanup?.(); } catch (e) { console.error(e); }
+    m.el.remove();
+  }
+
+  async onClose(): Promise<void> { this.unmountExt(); }
 
   // ---------- loans ----------
   private renderLoans(): void {

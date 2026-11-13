@@ -214,6 +214,11 @@
 .mf-wide { width: 100%; height: 44px; border-radius: 12px; }
 .mf-foot-note { text-align: center; padding: 4px 8px; }
 
+.mf-plan-ext .mf-tag-src { background: color-mix(in srgb, var(--interactive-accent) 18%, transparent); color: var(--interactive-accent); }
+/* Extension tabs: more than six tabs wrap into further rows on phones. */
+.mf-nav.has-ext { grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); }
+.mf-ext-host { display: flex; flex-direction: column; gap: 12px; }
+
 /* ===== Loans ===== */
 .mf-loan + .mf-loan { border-top: 1px solid var(--background-modifier-border); }
 .mf-loan-notes { padding: 0 0 10px 50px; }

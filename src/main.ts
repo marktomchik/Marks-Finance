@@ -1,10 +1,13 @@
 import { App, normalizePath, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, debounce } from "obsidian";
 import { CURRENCIES, CURRENCY_LABEL, FinanceFile, Note, PlanItem, parseFinance } from "./data";
 import { FinanceView, VIEW_TYPE } from "./view";
+import { ExtensionHost, MarkFinanceApi, READY_EVENT } from "./extensions";
 
 interface Settings {
   dataPath: string;
   localPath: string;
+  /** Folder for plan lines written by extensions (one JSON file per source). */
+  externalPlanDir: string;
   currency: string;
   /** Optional fixed rates (PLN per 1 unit); 0 = use NBP rates from the data file. */
   fixedRates: Record<string, number>;
@@ -13,6 +16,7 @@ interface Settings {
 const DEFAULT_SETTINGS: Settings = {
   dataPath: "Фінанси/finance-data.json",
   localPath: "Фінанси/finance-local.json",
+  externalPlanDir: "Фінанси/plan-external",
   currency: "PLN",
   fixedRates: {},
   bigAmount: 200,
@@ -23,11 +27,16 @@ export interface LocalStore { plan: PlanItem[]; notes: Note[]; updatedAt?: strin
 
 export default class MarkFinancePlugin extends Plugin {
   settings!: Settings;
+  ext!: ExtensionHost;
+  /** Extensions API (see EXTENSIONS.md): app.plugins.plugins["mark-finance"].api */
+  api!: MarkFinanceApi;
 
   async onload(): Promise<void> {
     const saved = (await this.loadData()) ?? {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, saved);
     this.settings.fixedRates = { ...(saved.fixedRates ?? {}) };
+    this.ext = new ExtensionHost(this.app, () => this.settings.externalPlanDir, () => this.rerenderViews());
+    this.api = this.ext.api;
     this.registerView(VIEW_TYPE, (leaf) => new FinanceView(leaf, this));
     this.addRibbonIcon("wallet", "Фінанси Марка", () => this.activateView());
     this.addCommand({ id: "open", name: "Відкрити фінанси", callback: () => this.activateView() });
@@ -36,11 +45,25 @@ export default class MarkFinancePlugin extends Plugin {
 
     // Re-render when sync replaces the data file or the plan/notes file.
     const onChange = debounce(() => this.refreshViews(), 1500, true);
+    const onExtChange = debounce(async () => { await this.ext.loadAll(); this.rerenderViews(); }, 1500, true);
     const watch = (f: TAbstractFile) => {
       if (f.path === normalizePath(this.settings.dataPath) || f.path === normalizePath(this.settings.localPath)) onChange();
+      else if (this.ext.isOwnFile(f.path)) onExtChange();
     };
     this.registerEvent(this.app.vault.on("modify", watch));
     this.registerEvent(this.app.vault.on("create", watch));
+    this.registerEvent(this.app.vault.on("delete", watch));
+
+    // Extensions: load saved plan lines first, then announce the API.
+    this.app.workspace.onLayoutReady(async () => {
+      await this.ext.loadAll();
+      this.rerenderViews();
+      this.app.workspace.trigger(READY_EVENT, this.api);
+    });
+  }
+
+  onunload(): void {
+    this.ext?.tabs.clear();
   }
 
   async loadFinance(): Promise<FinanceFile> {
