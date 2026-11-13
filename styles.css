@@ -242,3 +242,10 @@
   .mf-scroll { padding: 8px 20px 24px; }
   .mf-hero-value { font-size: 2.4em; }
 }
+
+/* v3: adding and editing operations */
+.mf-search:has(.mf-add-btn) input { padding-right: 52px; }
+.mf-add-btn { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 36px; height: 36px; border-radius: 18px; padding: 0; display: inline-flex; align-items: center; justify-content: center; background: var(--interactive-accent); color: var(--text-on-accent); box-shadow: none; }
+.mf-add-btn svg { width: 18px; height: 18px; }
+.mf-btn-small { margin-top: 8px; display: inline-flex; gap: 6px; align-items: center; font-size: var(--font-ui-small); }
+.mf-btn-small svg { width: 14px; height: 14px; }

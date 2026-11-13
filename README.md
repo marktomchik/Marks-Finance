@@ -3,7 +3,7 @@
 Offline personal finance dashboard for Obsidian (desktop and Android), with the same features as the author's Google Apps Script finance tracker.
 Mobile-first: the month switcher and tabs are at the top, so nothing sits under Obsidian's mobile toolbar. Lists are paginated and line items load only when you open them, which keeps memory use low.
 
-It reads one JSON file from the vault and shows six tabs:
+It reads monthly ledger files from the vault (see below) and shows six tabs. The **+** button (view header and the Операції tab) adds an operation by hand — handy for cash on the phone:
 
 - **Огляд** (overview):
   - spending with the change from the previous period;
@@ -39,24 +39,41 @@ Period: month (swipe or arrows), year, all time, or a custom range.
 
 **Plan and notes** are saved to a second vault file (default `Фінанси/finance-local.json`), so they sync to other devices with the vault. The first time, they are seeded from the data file.
 
-## Data file
+## Data (format v3: monthly ledger)
 
-Default path: `Фінанси/finance-data.json` (configurable). The plugin re-renders when sync replaces the file. See [`example/finance-data.example.json`](example/finance-data.example.json) (all values invented).
+Everything lives in one vault folder (default `Фінанси/`, configurable). Each file has **one writer**, so phone, laptop and `/finance-check` never edit the same file and sync stays conflict-free:
+
+| File | Written by | What |
+|---|---|---|
+| `ledger/YYYY-MM.json` | `/finance-check` | bank statements and receipts for one month, one transaction per line |
+| `manual/YYYY-MM.json` | the plugin | operations added with **+** (cash by default), editable and deletable |
+| `overrides.json` | the plugin | your changes to ledger rows: category, note, "not counted" |
+| `meta.json` | `/finance-check` | category names and budgets, loans, receipts waiting for review, NBP rates |
+| `finance-local.json` | the plugin | plan and notes |
+
+Month file:
+
+```json
+{"month":"2026-10","updatedAt":"2026-11-13T15:00:00.000Z","transactions":[
+{"tx_id":"8a377af1f87739af","date":"2026-10-08","amount":101.36,"direction":"debit","currency":"PLN","merchant":"Shell","description":"ZAKUP PRZY UŻYCIU KARTY | SHELL 09 Krakow PL","category":"fuel","payment":"card","hasReceipt":true,"receiptUrl":"https://drive.google.com/file/d/<id>/view","items":[{"n":"Benzyna Shell FuelSave 95","t":101.36,"q":14.04,"u":"l"}]}
+]}
+```
+
+- A ledger row with `"replaces":"<manual tx_id>"` hides that manual row (e.g. the receipt photo for cash you already entered by hand).
+- Internal money movements and purchase+refund pairs are detected by the plugin; the files store plain facts.
+- Missing NBP rates (EUR, USD, UAH) are fetched by the plugin and cached in its settings.
+- If `ledger/` does not exist, the plugin reads the old single file `Фінанси/finance-data.json` (format v2, fields below).
+
+`tools/split-to-ledger.mjs` converts a v2 file into the v3 folder once. `tools/build-from-sheet.mjs` builds a v2 file from the old Google Sheet.
+
+### Transaction fields
 
 ```json
 {
-  "meta": { "generatedAt": "2025-05-01T10:00:00.000Z", "currency": "PLN" },
-  "fx": { "EUR": [["2025-04-01", 4.28]], "USD": [], "UAH": [] },
-  "transactions": [
-    {
-      "tx_id": "ex-1", "date": "2025-04-12", "amount": 42.5, "direction": "debit",
-      "merchant": "Sklep Przykład", "category": "groceries", "payment": "card",
-      "hasReceipt": true, "receiptUrl": "https://drive.google.com/file/d/<id>/view",
-      "items": [{ "n": "Mleko 3,2%", "t": 4.2 }, { "n": "Chleb", "t": 6.5, "s": "bread" }]
-    }
-  ],
-  "plan": [{ "id": "p1", "kind": "expense", "name": "Продукти", "category": "groceries", "amount": 900, "month": "2025-05" }],
-  "notes": [], "loans": [], "review": [], "categoryDefs": []
+  "tx_id": "ex-1", "date": "2025-04-12", "amount": 42.5, "direction": "debit",
+  "merchant": "Sklep Przykład", "category": "groceries", "payment": "card",
+  "hasReceipt": true, "receiptUrl": "https://drive.google.com/file/d/<id>/view",
+  "items": [{ "n": "Mleko 3,2%", "t": 4.2 }, { "n": "Chleb", "t": 6.5, "s": "bread" }]
 }
 ```
 
@@ -64,7 +81,7 @@ Field notes:
 - `amount` is always positive and in PLN.
 - `direction` is `debit` (spend) or `credit` (income).
 - `orig` keeps a foreign-currency original.
-- `excluded: "transfer" | "refund"` keeps a row out of the totals.
+- `excluded: "transfer" | "manual"` keeps a row out of the totals (`internal` and `refund` are computed).
 - Item fields:
   - `n` is the name and `t` the total;
   - `q` and `u` are the quantity and unit;
@@ -72,8 +89,6 @@ Field notes:
   - `s` is the subcategory (optional; otherwise derived from keywords).
 
 Keep receipt photos **out** of the synced folder: link them with `receiptUrl` so mobile sync stays light.
-
-`tools/build-from-sheet.mjs` builds this file from table dumps of a Google Sheet (Transactions, Receipts, ReceiptItems, Categories, Loans, Notes, Plan) and fetches NBP rates.
 
 ## Extensions API
 

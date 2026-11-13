@@ -28,7 +28,15 @@ export interface Transaction {
   excluded?: string;
   orig?: { amount: number; currency: string; fx?: number };
   items?: Item[];
+  /** "ledger" (bank/receipts, written by /finance-check) or "manual" (entered in the plugin). */
+  origin?: "ledger" | "manual" | "legacy";
+  /** A ledger row that replaces a manual entry (e.g. the receipt photo for cash entered by hand). */
+  replaces?: string;
+  source?: string;
 }
+
+/** What the user changed on a ledger row in the plugin (kept in overrides.json, never in the ledger). */
+export interface TxOverride { category?: string; notes?: string; verified?: boolean; excluded?: string | null }
 
 export interface Loan { id: string; person: string; direction: string; amount: number; currency: string; dateGiven: string; dateReturned: string | null; status: string; notes?: string }
 export interface Note { id: string; text: string; created: string; done: boolean }
@@ -110,7 +118,12 @@ export function isInternal(t: Partial<Transaction>): boolean {
 export function parseFinance(text: string): FinanceFile {
   const raw = JSON.parse(text) as Partial<FinanceFile>;
   if (!raw || !Array.isArray(raw.transactions)) throw new Error("У файлі немає масиву transactions");
-  const transactions = raw.transactions
+  return normalizeFinance(raw as FinanceFile, false);
+}
+
+/** Cleans amounts/directions, marks internal movements and (optionally) purchase+refund pairs, sorts newest first. */
+export function normalizeFinance(raw: FinanceFile, findRefunds: boolean): FinanceFile {
+  const transactions = (raw.transactions ?? [])
     .filter((t) => t && typeof t.date === "string" && isFinite(Number(t.amount)))
     .map((t) => {
       const x = { ...t, amount: Math.abs(Number(t.amount)), direction: (t.direction === "credit" ? "credit" : "debit") as Direction };
@@ -118,8 +131,78 @@ export function parseFinance(text: string): FinanceFile {
       return x;
     })
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
+  if (findRefunds) markRefundPairs(transactions);
   setCategoryDefs(raw.categoryDefs);
   return { ...raw, transactions } as FinanceFile;
+}
+
+// ---------- Ledger (format v3: one file per month) ----------
+/** A month file: `{"month":"2026-10","transactions":[...]}` with one transaction per line. */
+export interface MonthFile { month?: string; updatedAt?: string; transactions: Transaction[] }
+
+export function parseMonthFile(text: string): Transaction[] {
+  const raw = JSON.parse(text) as Partial<MonthFile> | Transaction[];
+  const list = Array.isArray(raw) ? raw : raw?.transactions;
+  return Array.isArray(list) ? list : [];
+}
+/** One transaction per line keeps sync diffs small and the file readable. */
+export function serializeMonthFile(month: string, txs: Transaction[]): string {
+  const rows = [...txs].sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0)).map((t) => JSON.stringify(t));
+  return `{"month":${JSON.stringify(month)},"updatedAt":${JSON.stringify(new Date().toISOString())},"transactions":[\n${rows.join(",\n")}\n]}\n`;
+}
+
+/** Builds the in-memory file from ledger rows, manual rows, the user's overrides and meta.json. */
+export function assembleLedger(meta: Partial<FinanceFile>, ledger: Transaction[], manual: Transaction[], overrides: Record<string, TxOverride>): FinanceFile {
+  const replaced = new Set(ledger.map((t) => t.replaces).filter((x): x is string => !!x));
+  const seen = new Set<string>();
+  const all: Transaction[] = [];
+  const add = (t: Transaction, origin: Transaction["origin"]) => {
+    if (!t || !t.tx_id || seen.has(t.tx_id)) return;
+    seen.add(t.tx_id);
+    const o = overrides[t.tx_id];
+    const x: Transaction = { ...t, origin };
+    if (o) {
+      if (o.category) { x.category = o.category; delete x.category_name; }
+      if (o.notes !== undefined) x.notes = o.notes;
+      if (o.verified !== undefined) x.verified = o.verified;
+      if (o.excluded !== undefined) { if (o.excluded) x.excluded = o.excluded; else delete x.excluded; }
+    }
+    all.push(x);
+  };
+  for (const t of ledger) add(t, "ledger");
+  for (const t of manual) if (!replaced.has(t.tx_id)) add({ payment: "cash", ...t }, "manual");
+  return normalizeFinance({ ...meta, transactions: all } as FinanceFile, true);
+}
+
+/** Purchase + full refund (same merchant, same amount, within 90 days, one each) are shown but never counted.
+ *  Same rule as tools/build-from-sheet.mjs. Rows that already carry `excluded` are left alone. */
+export function markRefundPairs(txs: Transaction[]): void {
+  const key = (s = "") => s.toLowerCase().replace(/^www\./, "").replace(/[^a-z0-9]/g, "");
+  const groups = new Map<string, { d: Transaction[]; c: Transaction[] }>();
+  for (const t of txs) {
+    if (t.excluded) continue;
+    const k = key(t.merchant) || key(t.description);
+    if (!k) continue;
+    const g = `${k}|${Math.round(t.amount * 100)}`;
+    if (!groups.has(g)) groups.set(g, { d: [], c: [] });
+    groups.get(g)![t.direction === "debit" ? "d" : "c"].push(t);
+  }
+  for (const g of groups.values()) {
+    if (g.d.length !== 1 || g.c.length !== 1) continue;
+    if (Math.abs(Date.parse(g.d[0].date) - Date.parse(g.c[0].date)) > 90 * 86_400_000) continue;
+    g.d[0].excluded = "refund"; g.c[0].excluded = "refund";
+  }
+}
+
+/** Merges NBP series (later points win for the same date), sorted by date. */
+export function mergeFx(a: FinanceFile["fx"], b: FinanceFile["fx"]): Record<string, [string, number][]> {
+  const out: Record<string, [string, number][]> = {};
+  for (const src of [a ?? {}, b ?? {}]) for (const [cur, pts] of Object.entries(src)) {
+    const m = new Map((out[cur] ?? []).map((p) => [p[0], p[1]] as [string, number]));
+    for (const [d, v] of pts ?? []) m.set(d, v);
+    out[cur] = [...m.entries()].sort((x, y) => (x[0] < y[0] ? -1 : 1));
+  }
+  return out;
 }
 
 export const r2 = (n: number): number => Math.round(n * 100) / 100;

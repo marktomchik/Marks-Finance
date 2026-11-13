@@ -7,7 +7,7 @@ import {
   Converter, convertTransactions, CURRENCY_LABEL, categoryDetail, categoryShares, inCategory,
   PlanItem, Note, loanSign, loanActive,
 } from "./data";
-import { PlanModal, NoteModal } from "./modals";
+import { PlanModal, NoteModal, TxModal, OverrideModal, TxDraft } from "./modals";
 import type { ExtensionTab } from "./extensions";
 
 export const VIEW_TYPE = "mark-finance-view";
@@ -23,7 +23,7 @@ const TABS: [BuiltinTab, string, string][] = [
   ["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["plan", "План", "target"],
   ["loans", "Борги", "hand-coins"], ["notes", "Нотатки", "sticky-note"], ["review", "Перевірка", "check-circle"],
 ];
-const EXCLUDED_LABEL: Record<string, string> = { transfer: "переказ між своїми", refund: "повернення", internal: "внутрішній рух" };
+const EXCLUDED_LABEL: Record<string, string> = { transfer: "переказ між своїми", refund: "повернення", internal: "внутрішній рух", manual: "не враховується" };
 
 export class FinanceView extends ItemView {
   private plugin: MarkFinancePlugin;
@@ -32,6 +32,8 @@ export class FinanceView extends ItemView {
   private conv!: Converter;
   private local: LocalStore = { plan: [], notes: [] };
   private error = "";
+  /** true when the data comes from <dataDir>/ledger (format v3): adding and editing operations is possible. */
+  private v3 = false;
   private tab: Tab = "overview";
   private mode: Mode = "month";
   private anchor = "";
@@ -58,13 +60,55 @@ export class FinanceView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.contentEl.addClass("mf-root");
+    this.addAction("plus", "Нова операція", () => this.openNewTx());
     await this.reload();
+  }
+
+  private categoryCodes(): string[] {
+    return Object.keys(CATEGORY_NAMES).concat((this.data?.categoryDefs ?? []).map((c) => c.code))
+      .filter((c, i, a) => c !== "internal" && a.indexOf(c) === i);
+  }
+  /** New cash operation (or card, if chosen) entered by hand. */
+  openNewTx(): void {
+    if (!this.v3) { new Notice("Додавати операції можна після переходу на папку ledger/ (формат v3)."); return; }
+    const today = new Date().toISOString().slice(0, 10);
+    const draft: TxDraft = { tx_id: "", date: today, amount: 0, direction: "debit", category: "groceries", merchant: "", notes: "", payment: "cash" };
+    new TxModal(this.app, draft, this.categoryCodes(), async (res) => {
+      if (res === "delete") return;
+      const id = `m-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+      await this.saveManual(res, id);
+    }).open();
+  }
+  private async saveManual(d: TxDraft, id: string, oldDate?: string): Promise<void> {
+    const tx: Transaction = {
+      tx_id: id, date: d.date, amount: Math.round(d.amount * 100) / 100, direction: d.direction, currency: "PLN",
+      merchant: d.merchant.trim(), description: "", category: d.category, payment: d.payment, account: d.payment === "cash" ? "cash" : "",
+      notes: d.notes.trim(), source: "manual", hasReceipt: false, receiptUrl: null, verified: true, created: new Date().toISOString(),
+    } as Transaction;
+    try { await this.plugin.saveManual(tx, oldDate); new Notice(oldDate ? "Операцію змінено" : "Операцію додано"); }
+    catch (e) { new Notice(`Не вдалося зберегти: ${e instanceof Error ? e.message : e}`); }
+  }
+  private editTx(t: Transaction): void {
+    const raw = this.data?.transactions.find((x) => x.tx_id === t.tx_id) ?? t; // PLN values, not the display currency
+    if (raw.origin === "manual") {
+      const d: TxDraft = { tx_id: raw.tx_id, date: raw.date, amount: raw.amount, direction: raw.direction, category: raw.category || "other", merchant: raw.merchant || "", notes: raw.notes || "", payment: raw.payment || "cash" };
+      new TxModal(this.app, d, this.categoryCodes(), async (res) => {
+        if (res === "delete") { await this.plugin.deleteManual(raw.tx_id, raw.date); new Notice("Операцію видалено"); return; }
+        await this.saveManual(res, raw.tx_id, raw.date);
+      }).open();
+      return;
+    }
+    new OverrideModal(this.app, raw, this.categoryCodes(), async (res) => {
+      await this.plugin.setOverride(raw.tx_id, res);
+      new Notice(res ? "Зміни збережено" : "Зміни скинуто");
+    }).open();
   }
 
   private get cur(): string { return CURRENCY_LABEL[this.conv?.target] ?? this.conv?.target ?? "zł"; }
 
   async reload(): Promise<void> {
     try {
+      this.v3 = (await this.plugin.format()) === "v3";
       this.data = await this.plugin.loadFinance();
       this.local = await this.plugin.loadLocal(this.data);
       this.applyCurrency();
@@ -154,7 +198,7 @@ export class FinanceView extends ItemView {
       const ic = box.createDiv("mf-empty-icon"); setIcon(ic, "wallet");
       box.createEl("p", { text: `Не вдалося прочитати «${this.plugin.settings.dataPath}».` });
       if (this.error) box.createEl("p", { cls: "mf-muted", text: this.error });
-      box.createEl("p", { cls: "mf-muted", text: "Файл створює /finance-check. Шлях можна змінити в налаштуваннях плагіна." });
+      box.createEl("p", { cls: "mf-muted", text: "Дані створює /finance-check у папці фінансів (ledger/, meta.json). Шлях можна змінити в налаштуваннях плагіна." });
       const b = box.createEl("button", { cls: "mod-cta", text: "Спробувати ще" });
       b.onclick = () => void this.reload();
       return;
@@ -466,6 +510,11 @@ export class FinanceView extends ItemView {
     const searchWrap = tools.createDiv("mf-search");
     setIcon(searchWrap.createSpan("mf-search-icon"), "search");
     const q = searchWrap.createEl("input", { type: "search", placeholder: "Магазин, сума, нотатка, позиція…", value: this.search });
+    if (this.v3) {
+      const add = searchWrap.createEl("button", { cls: "mf-add-btn", attr: { "aria-label": "Нова операція" } });
+      setIcon(add, "plus");
+      add.onclick = () => this.openNewTx();
+    }
     const chips = tools.createDiv("mf-chips");
     const list = el.createDiv();
 
@@ -840,6 +889,7 @@ export class FinanceView extends ItemView {
       const sub = mid.createDiv({ cls: "mf-muted mf-small mf-tx-sub" });
       sub.createSpan({ text: grouped ? categoryName(t) : `${t.date.slice(8)}.${t.date.slice(5, 7)} · ${categoryName(t)}` });
       if (t.payment === "cash") sub.createSpan({ cls: "mf-tag", text: "готівка" });
+      if (t.origin === "manual") sub.createSpan({ cls: "mf-tag", text: "вручну" });
       if (t.orig) sub.createSpan({ cls: "mf-tag", text: t.orig.currency });
       if (t.excluded) sub.createSpan({ cls: "mf-tag", text: EXCLUDED_LABEL[t.excluded] || t.excluded });
       if (t.hasReceipt) setIcon(sub.createSpan({ cls: "mf-receipt", attr: { "aria-label": "Є чек" } }), "receipt");
@@ -863,6 +913,12 @@ export class FinanceView extends ItemView {
           }
         }
         if (t.receiptUrl) this.receiptButton(det, t.receiptUrl);
+        if (this.v3 && t.excluded !== "internal") {
+          const eb = det.createEl("button", { cls: "mf-btn-small" });
+          setIcon(eb.createSpan(), "pencil");
+          eb.createSpan({ text: t.origin === "manual" ? "Редагувати" : "Категорія / нотатка" });
+          eb.onclick = (e) => { e.stopPropagation(); this.editTx(t); };
+        }
       };
     }
   }
