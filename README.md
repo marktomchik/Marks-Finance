@@ -33,6 +33,8 @@ It reads one JSON file from the vault and shows six tabs:
 
 Period: month (swipe or arrows), year, all time, or a custom range.
 
+**Internal movements** are never spending or income: cash deposits and ATM withdrawals, currency exchange (for example PLN→EUR to set rent money aside, and back), and transfers between own accounts. They get the service category `internal` (from `tools/build-from-sheet.mjs` or the same keyword rule in the plugin). They are left out of every total and chart, shown greyed in lists and in a collapsed «Внутрішні рухи» block.
+
 **Currency:** PLN, EUR, USD or UAH (settings). Amounts are converted with NBP mid rates for each transaction date, which are stored in the data file; a fixed rate can be set instead. Transfers between own accounts and purchase+refund pairs are shown but never counted.
 
 **Plan and notes** are saved to a second vault file (default `Фінанси/finance-local.json`), so they sync to other devices with the vault. The first time, they are seeded from the data file.

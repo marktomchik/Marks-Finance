@@ -23,7 +23,7 @@ const TABS: [BuiltinTab, string, string][] = [
   ["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["plan", "План", "target"],
   ["loans", "Борги", "hand-coins"], ["notes", "Нотатки", "sticky-note"], ["review", "Перевірка", "check-circle"],
 ];
-const EXCLUDED_LABEL: Record<string, string> = { transfer: "переказ між своїми", refund: "повернення" };
+const EXCLUDED_LABEL: Record<string, string> = { transfer: "переказ між своїми", refund: "повернення", internal: "внутрішній рух" };
 
 export class FinanceView extends ItemView {
   private plugin: MarkFinancePlugin;
@@ -324,12 +324,31 @@ export class FinanceView extends ItemView {
       this.splitBar(pay, s, cur);
     }
 
+    this.internalBlock(txs);
+
     if (txs.length) {
       const recent = this.card("Останні операції");
       this.txList(recent, txs.slice(0, 5), cur, false);
       const more = recent.createEl("button", { cls: "mf-link-btn", text: "Усі операції →" });
       more.onclick = () => this.openTransactions("", "");
     }
+  }
+
+  /** Internal movements and other excluded rows: shown collapsed, never counted. */
+  private internalBlock(txs: Transaction[]): void {
+    const ex = txs.filter((t) => t.excluded);
+    if (!ex.length) return;
+    const cur = this.cur;
+    const out = r2(ex.filter((t) => t.direction === "debit").reduce((s, t) => s + t.amount, 0));
+    const inn = r2(ex.filter((t) => t.direction === "credit").reduce((s, t) => s + t.amount, 0));
+    const box = this.scrollEl.createEl("details", { cls: "mf-card mf-issue mf-internal" });
+    const sm = box.createEl("summary");
+    setIcon(sm.createSpan("mf-issue-icon"), "repeat-2");
+    const t = sm.createDiv("mf-cover-text");
+    t.createDiv({ text: `Внутрішні рухи · ${ex.length}` });
+    t.createDiv({ cls: "mf-muted mf-small", text: `Не витрати й не доходи: внесення і зняття готівки, обмін валют, перекази між своїми рахунками, повернення. Вийшло ${money(out, cur)} · зайшло ${money(inn, cur)}.` });
+    let drawn = false;
+    box.addEventListener("toggle", () => { if (box.open && !drawn) { drawn = true; this.txList(box, ex, cur, false); } });
   }
 
   private categoryRows(el: HTMLElement, list: Summary["categories"], total: number, onTap: (code: string) => void): void {

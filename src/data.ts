@@ -71,6 +71,7 @@ export const CATEGORY_NAMES: Record<string, string> = {
   alcohol: "Алкоголь",
   family: "Родина",
   school: "Школа",
+  internal: "Внутрішні перекази",
   other: "Інше",
 };
 
@@ -97,12 +98,25 @@ export function categoryName(t: { category?: string; category_name?: string }): 
   return t.category_name || CATEGORY_NAMES[t.category || "other"] || t.category || "Інше";
 }
 
+// Internal money movements (cash deposits / ATM withdrawals, currency exchange, transfers between own
+// accounts): never spending, never income. Same rule as tools/build-from-sheet.mjs, applied here too so
+// older data files are read correctly.
+const INTERNAL_RE = /wp[łl]ata got[óo]wki|wp[łl]atomat|wyp[łl]ata w bankomacie|bankomat|wymiana w kantorze|\bkantor|przelew w[łl]asn|w[łl]asny rach|mi[ęe]dzy w[łl]asnymi|власними карт|між власними|внесення готівки|зняття готівки|own account/i;
+export function isInternal(t: Partial<Transaction>): boolean {
+  if (t.excluded === "internal" || t.category === "internal" || t.category === "cash_withdrawal") return true;
+  return INTERNAL_RE.test(`${t.description ?? ""} ${t.merchant ?? ""} ${t.notes ?? ""}`);
+}
+
 export function parseFinance(text: string): FinanceFile {
   const raw = JSON.parse(text) as Partial<FinanceFile>;
   if (!raw || !Array.isArray(raw.transactions)) throw new Error("У файлі немає масиву transactions");
   const transactions = raw.transactions
     .filter((t) => t && typeof t.date === "string" && isFinite(Number(t.amount)))
-    .map((t) => ({ ...t, amount: Math.abs(Number(t.amount)), direction: (t.direction === "credit" ? "credit" : "debit") as Direction }))
+    .map((t) => {
+      const x = { ...t, amount: Math.abs(Number(t.amount)), direction: (t.direction === "credit" ? "credit" : "debit") as Direction };
+      if (isInternal(x)) { x.excluded = "internal"; x.category = "internal"; x.category_name = "Внутрішні перекази"; }
+      return x;
+    })
     .sort((a, b) => (a.date < b.date ? 1 : a.date > b.date ? -1 : 0));
   setCategoryDefs(raw.categoryDefs);
   return { ...raw, transactions } as FinanceFile;
@@ -368,4 +382,5 @@ export const CATEGORY_ICONS: Record<string, string> = {
   dining: "utensils", transport: "bus", travel: "plane", car: "car", entertainment: "gamepad-2",
   health: "heart-pulse", clothing: "shirt", telecom: "smartphone", taxes: "landmark", other: "circle-dot",
   business: "briefcase", cash_withdrawal: "banknote", alcohol: "wine", family: "users", school: "school",
+  internal: "repeat-2",
 };

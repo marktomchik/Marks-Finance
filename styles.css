@@ -203,7 +203,8 @@
 .mf-icon-btn { flex: none; width: 36px; height: 36px; padding: 0; display: inline-flex; align-items: center; justify-content: center; border-radius: 10px; background: var(--background-primary) !important; box-shadow: none !important; color: var(--interactive-accent); }
 .mf-icon-btn svg, .mf-receipt-btn svg { width: 16px; height: 16px; }
 .mf-receipt-btn { align-self: flex-start; margin-top: 6px; color: var(--interactive-accent); }
-.mf-tx.is-excluded { opacity: .6; }
+.mf-tx.is-excluded { opacity: .6; filter: grayscale(1); }
+.mf-internal .mf-issue-icon { color: var(--text-muted); }
 .mf-tx.is-excluded .mf-tx-amt { text-decoration: line-through; }
 
 /* ===== Plan ===== */

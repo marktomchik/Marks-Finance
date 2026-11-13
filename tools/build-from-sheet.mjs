@@ -31,6 +31,15 @@ const yes = (s) => /^(✔|true|так|1|yes)$/i.test(s);
 const T = load("Transactions"), R = load("Receipts"), I = load("ReceiptItems"), C = load("Categories");
 const LO = load("Loans"), N = load("Notes"), P = load("Plan");
 
+// Internal money movements: not spending, not income. Cash deposits and ATM withdrawals, currency exchange
+// (e.g. PLN→EUR to "freeze" rent money and back), transfers between own accounts/cards.
+// The Sheet category is kept as is; the export overrides it with "internal".
+const INTERNAL_RE = /wp[łl]ata got[óo]wki|wp[łl]atomat|wyp[łl]ata w bankomacie|bankomat|wymiana w kantorze|kantor|przelew w[łl]asn|w[łl]asny rach|mi[ęe]dzy w[łl]asnymi|власними карт|між власними|внесення готівки|зняття готівки|own account/i;
+export function isInternal(t) {
+  if (["internal", "cash_withdrawal"].includes(t.category)) return true;
+  return INTERNAL_RE.test(`${t.raw_description || ""} ${t.merchant || ""} ${t.notes || ""}`);
+}
+
 const catName = Object.fromEntries(C.filter((c) => c.code).map((c) => [c.code, c.name_ua || c.code]));
 const receiptByTx = new Map(), receiptById = new Map();
 for (const r of R) { receiptById.set(r.receipt_id, r); if (r.tx_id) receiptByTx.set(r.tx_id, r); }
@@ -47,7 +56,7 @@ const cancelled = new Set();
 {
   const groups = new Map();
   for (const t of T) {
-    if (t.source === "transfer" || !t.tx_id) continue;
+    if (t.source === "transfer" || !t.tx_id || isInternal(t)) continue;
     const key = merchantKey(t.merchant) || merchantKey(t.raw_description);
     if (!key) continue;
     const g = `${key}|${Math.round(num(t.amount) * (num(t.fx_rate_pln) || 1) * 100)}`;
@@ -72,7 +81,8 @@ for (const [rowNo, t] of T.entries()) {
   const fx = num(t.fx_rate_pln) || 1;
   const amountOrig = Math.abs(num(t.amount));
   const receipt = (t.receipt_id && receiptById.get(t.receipt_id)) || receiptByTx.get(t.tx_id) || null;
-  const category = t.category || (receipt && receipt.category) || "other";
+  const internal = isInternal(t);
+  const category = internal ? "internal" : t.category || (receipt && receipt.category) || "other";
   const account = t.account || "";
   const cash = account ? account === "cash" : t.source === "receipt_cash";
   const tx = {
@@ -84,7 +94,7 @@ for (const [rowNo, t] of T.entries()) {
     merchant: t.merchant || "",
     description: t.raw_description || "",
     category,
-    category_name: catName[category] || "",
+    category_name: internal ? "Внутрішні перекази" : catName[category] || "",
     payment: cash ? "cash" : "card",
     account,
     source: t.source || "",
@@ -94,7 +104,8 @@ for (const [rowNo, t] of T.entries()) {
     verified: yes(t.verified),
   };
   if (currency !== "PLN") tx.orig = { amount: amountOrig, currency, fx };
-  if (t.source === "transfer") tx.excluded = "transfer";
+  if (internal) { tx.excluded = "internal"; if (t.category && t.category !== "internal") tx.sheetCategory = t.category; }
+  else if (t.source === "transfer") tx.excluded = "transfer";
   else if (cancelled.has(t.tx_id)) tx.excluded = "refund";
   if (receipt) {
     tx.receiptId = receipt.receipt_id;
@@ -145,6 +156,7 @@ const data = {
     dateFrom: dates[0], dateTo: dates.at(-1),
     totalSpend: sum(deb), totalIncome: sum(cre),
     currency: "PLN",
+    internalCount: transactions.filter((t) => t.excluded === "internal").length,
   },
   monthly: months.map((m) => ({ month: m, spend: sum(deb.filter((t) => t.date.startsWith(m))), income: sum(cre.filter((t) => t.date.startsWith(m))) })),
   paymentSplit: { card: sum(deb.filter((t) => t.payment !== "cash")), cash: sum(deb.filter((t) => t.payment === "cash")) },

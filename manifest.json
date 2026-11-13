@@ -1,7 +1,7 @@
 {
   "id": "mark-finance",
   "name": "Фінанси Марка",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "minAppVersion": "1.5.0",
   "description": "Offline finance dashboard: categories with receipt-level drill-down, plan, debts, notes, review, currency switch — from a JSON file in your vault.",
   "author": "Mark Lysak",
