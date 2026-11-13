@@ -1,6 +1,6 @@
 {
   "name": "mark-finance",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Offline personal finance dashboard for Obsidian, reading a lightweight JSON file from the vault.",
   "main": "main.js",
   "private": true,

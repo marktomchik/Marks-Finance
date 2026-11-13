@@ -1,31 +1,37 @@
 import { ItemView, Notice, WorkspaceLeaf, setIcon } from "obsidian";
 import type MarkFinancePlugin from "./main";
+import type { LocalStore } from "./main";
 import {
-  FinanceFile, Transaction, Summary, summarize, reconcile, categoryColor, categoryName,
-  money, monthLabel, MONTHS_UA, nextMonth, r2, CATEGORY_ICONS,
+  FinanceFile, Transaction, Summary, summarize, reconcile, categoryColor, categoryName, codeName,
+  money, monthLabel, MONTHS_UA, nextMonth, prevMonth, r2, CATEGORY_ICONS, CATEGORY_NAMES,
+  Converter, convertTransactions, CURRENCY_LABEL, categoryDetail, categoryShares, inCategory,
+  PlanItem, Note, loanSign, loanActive,
 } from "./data";
+import { PlanModal, NoteModal } from "./modals";
 
 export const VIEW_TYPE = "mark-finance-view";
-type Tab = "overview" | "transactions" | "reconcile";
+type Tab = "overview" | "transactions" | "plan" | "loans" | "notes" | "review";
 type Mode = "month" | "year" | "all" | "custom";
 const SVG_NS = "http://www.w3.org/2000/svg";
 const PAGE = 40;
 const MONTHS_FULL = ["Січень", "Лютий", "Березень", "Квітень", "Травень", "Червень", "Липень", "Серпень", "Вересень", "Жовтень", "Листопад", "Грудень"];
 const WEEKDAYS = ["Нд", "Пн", "Вт", "Ср", "Чт", "Пт", "Сб"];
-
-function prevMonth(m: string): string {
-  let [y, mo] = m.split("-").map(Number);
-  mo--; if (mo < 1) { mo = 12; y--; }
-  return `${y}-${String(mo).padStart(2, "0")}`;
-}
+const TABS: [Tab, string, string][] = [
+  ["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["plan", "План", "target"],
+  ["loans", "Борги", "hand-coins"], ["notes", "Нотатки", "sticky-note"], ["review", "Перевірка", "check-circle"],
+];
+const EXCLUDED_LABEL: Record<string, string> = { transfer: "переказ між своїми", refund: "повернення" };
 
 export class FinanceView extends ItemView {
   private plugin: MarkFinancePlugin;
   private data: FinanceFile | null = null;
+  private txs: Transaction[] = []; // in the display currency
+  private conv!: Converter;
+  private local: LocalStore = { plan: [], notes: [] };
   private error = "";
   private tab: Tab = "overview";
   private mode: Mode = "month";
-  private anchor = ""; // YYYY-MM for month mode, YYYY for year mode uses anchor.slice(0,4)
+  private anchor = "";
   private from = "";
   private to = "";
   private periodOpen = false;
@@ -33,6 +39,7 @@ export class FinanceView extends ItemView {
   private direction = "";
   private search = "";
   private shown = PAGE;
+  private detailCat = ""; // overview: category drill-down
   private scrollEl!: HTMLElement;
 
   constructor(leaf: WorkspaceLeaf, plugin: MarkFinancePlugin) {
@@ -49,17 +56,29 @@ export class FinanceView extends ItemView {
     await this.reload();
   }
 
+  private get cur(): string { return CURRENCY_LABEL[this.conv?.target] ?? this.conv?.target ?? "zł"; }
+
   async reload(): Promise<void> {
     try {
       this.data = await this.plugin.loadFinance();
+      this.local = await this.plugin.loadLocal(this.data);
+      this.applyCurrency();
       this.error = "";
       const last = this.lastDataMonth();
-      if (!this.anchor || (last && this.anchor > last)) this.anchor = last || new Date().toISOString().slice(0, 7);
+      if (!this.anchor || (this.tab !== "plan" && last && this.anchor > last)) this.anchor = last || new Date().toISOString().slice(0, 7);
     } catch (e) {
       this.data = null;
       this.error = e instanceof Error ? e.message : String(e);
     }
     this.render();
+  }
+
+  applyCurrency(): void {
+    if (!this.data) return;
+    const s = this.plugin.settings;
+    this.conv = new Converter(s.currency, this.data.fx, Number(s.fixedRates?.[s.currency]) || 0);
+    if (!this.conv.ok) { new Notice(`Немає курсу ${s.currency} у файлі даних — показую злоті.`); this.conv = new Converter("PLN", this.data.fx); }
+    this.txs = convertTransactions(this.data.transactions, this.conv);
   }
 
   // ---------- period ----------
@@ -84,8 +103,8 @@ export class FinanceView extends ItemView {
     if (this.mode === "month") return MONTHS_UA[Number(prevMonth(this.anchor).slice(5)) - 1];
     return String(Number(this.anchor.slice(0, 4)) - 1);
   }
-  private filter(a: string, b: string): Transaction[] {
-    return (this.data?.transactions ?? []).filter((t) => t.date >= a && t.date <= b);
+  private filter(a: string, b: string, src = this.txs): Transaction[] {
+    return src.filter((t) => t.date >= a && t.date <= b);
   }
   private step(dir: 1 | -1): void {
     if (dir > 0 && !this.canStepForward()) return;
@@ -94,6 +113,29 @@ export class FinanceView extends ItemView {
     else return;
     this.shown = PAGE;
     this.render(dir);
+  }
+
+  /** Latest YYYY-MM that has at least one transaction. */
+  private lastDataMonth(): string {
+    let max = "";
+    for (const t of this.data?.transactions ?? []) if (t.date > max) max = t.date;
+    return max.slice(0, 7);
+  }
+  /** The plan tab may look ahead: up to the latest planned month or a year from today. */
+  private lastAllowedMonth(): string {
+    const last = this.lastDataMonth();
+    if (this.tab !== "plan") return last;
+    let m = new Date().toISOString().slice(0, 7);
+    for (let i = 0; i < 12; i++) m = nextMonth(m);
+    for (const p of this.local.plan) if (p.month > m) m = p.month;
+    return m > last ? m : last;
+  }
+  private canStepForward(): boolean {
+    const last = this.lastAllowedMonth();
+    if (!last) return true;
+    if (this.mode === "month") return this.anchor < last;
+    if (this.mode === "year") return this.anchor.slice(0, 4) < last.slice(0, 4);
+    return false;
   }
 
   // ---------- render ----------
@@ -112,6 +154,7 @@ export class FinanceView extends ItemView {
       b.onclick = () => void this.reload();
       return;
     }
+    if (this.tab === "plan" && this.mode !== "month") this.mode = "month";
 
     this.renderHeader(root);
     this.scrollEl = root.createDiv("mf-scroll");
@@ -120,33 +163,40 @@ export class FinanceView extends ItemView {
 
     const [a, b] = this.range();
     const txs = this.filter(a, b);
-    if (txs.length === 0 && this.renderNoDataHint(this.scrollEl)) { if (keepScroll) this.scrollEl.scrollTop = keepScroll; return; }
-    if (this.tab === "overview") this.renderOverview(txs);
+    const periodless = this.tab === "loans" || this.tab === "notes" || this.tab === "plan";
+    if (!periodless && txs.length === 0 && this.renderNoDataHint(this.scrollEl)) { if (keepScroll) this.scrollEl.scrollTop = keepScroll; return; }
+    if (this.tab === "overview") { if (this.detailCat) this.renderCategoryDetail(txs, this.detailCat); else this.renderOverview(txs); }
     else if (this.tab === "transactions") this.renderTransactions(txs);
-    else this.renderReconcile(txs);
+    else if (this.tab === "plan") this.renderPlan();
+    else if (this.tab === "loans") this.renderLoans();
+    else if (this.tab === "notes") this.renderNotes();
+    else this.renderReview(txs);
 
     if (keepScroll) this.scrollEl.scrollTop = keepScroll;
   }
 
   private renderHeader(root: HTMLElement): void {
     const head = root.createDiv("mf-head");
-    const row = head.createDiv("mf-period-row");
-    const canStep = this.mode === "month" || this.mode === "year";
-    const prev = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Назад" } });
-    setIcon(prev, "chevron-left");
-    prev.disabled = !canStep;
-    prev.onclick = () => this.step(-1);
-    const label = row.createEl("button", { cls: "mf-period-label" });
-    label.createSpan({ text: this.periodLabel() });
-    setIcon(label.createSpan("mf-caret"), this.periodOpen ? "chevron-up" : "chevron-down");
-    label.onclick = () => { this.periodOpen = !this.periodOpen; this.render(); };
-    const next = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Вперед" } });
-    setIcon(next, "chevron-right");
-    next.disabled = !canStep || !this.canStepForward();
-    next.onclick = () => this.step(1);
+    const periodless = this.tab === "loans" || this.tab === "notes";
+    if (!periodless) {
+      const row = head.createDiv("mf-period-row");
+      const canStep = this.mode === "month" || this.mode === "year";
+      const prev = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Назад" } });
+      setIcon(prev, "chevron-left");
+      prev.disabled = !canStep;
+      prev.onclick = () => this.step(-1);
+      const label = row.createEl("button", { cls: "mf-period-label" });
+      label.createSpan({ text: this.periodLabel() });
+      if (this.tab !== "plan") setIcon(label.createSpan("mf-caret"), this.periodOpen ? "chevron-up" : "chevron-down");
+      label.onclick = () => { if (this.tab === "plan") return; this.periodOpen = !this.periodOpen; this.render(); };
+      const next = row.createEl("button", { cls: "mf-round", attr: { "aria-label": "Вперед" } });
+      setIcon(next, "chevron-right");
+      next.disabled = !canStep || !this.canStepForward();
+      next.onclick = () => this.step(1);
+    }
     this.renderNav(head);
 
-    if (this.periodOpen) {
+    if (this.periodOpen && !periodless && this.tab !== "plan") {
       const panel = head.createDiv("mf-period-panel");
       const seg = panel.createDiv("mf-seg");
       const modes: [Mode, string][] = [["month", "Місяць"], ["year", "Рік"], ["all", "Весь час"], ["custom", "Період"]];
@@ -169,21 +219,6 @@ export class FinanceView extends ItemView {
     }
   }
 
-  /** Latest YYYY-MM that has at least one transaction. */
-  private lastDataMonth(): string {
-    let max = "";
-    for (const t of this.data?.transactions ?? []) if (t.date > max) max = t.date;
-    return max.slice(0, 7);
-  }
-
-  private canStepForward(): boolean {
-    const last = this.lastDataMonth();
-    if (!last) return true;
-    if (this.mode === "month") return this.anchor < last;
-    if (this.mode === "year") return this.anchor.slice(0, 4) < last.slice(0, 4);
-    return false;
-  }
-
   /** Shown when the selected period has no transactions but data exists elsewhere. */
   private renderNoDataHint(el: HTMLElement): boolean {
     const last = this.lastDataMonth();
@@ -199,24 +234,30 @@ export class FinanceView extends ItemView {
 
   private renderNav(root: HTMLElement): void {
     const nav = root.createDiv({ cls: "mf-nav", attr: { role: "tablist" } });
-    const items: [Tab, string, string][] = [["overview", "Огляд", "pie-chart"], ["transactions", "Операції", "list"], ["reconcile", "Звірка", "check-circle"]];
-    for (const [id, label, icon] of items) {
-      const b = nav.createEl("button", { cls: id === this.tab ? "is-active" : "" });
+    for (const [id, label, icon] of TABS) {
+      const b = nav.createEl("button", { cls: id === this.tab ? "is-active" : "", attr: { role: "tab", "aria-label": label } });
       setIcon(b.createSpan("mf-nav-icon"), icon);
       b.createSpan({ cls: "mf-nav-label", text: label });
-      b.onclick = () => { this.tab = id; this.shown = PAGE; this.periodOpen = false; this.render(); this.scrollEl.scrollTop = 0; };
+      b.onclick = () => {
+        if (id === "overview" && this.tab === "overview") this.detailCat = "";
+        const leavingPlan = this.tab === "plan" && id !== "plan";
+        this.tab = id; this.shown = PAGE; this.periodOpen = false;
+        if (leavingPlan) { const last = this.lastDataMonth(); if (last && this.anchor > last) this.anchor = last; }
+        this.render(); this.scrollEl.scrollTop = 0;
+      };
     }
+    nav.querySelector(".is-active")?.scrollIntoView({ inline: "nearest", block: "nearest" });
   }
 
   private attachSwipe(el: HTMLElement): void {
     let x0 = 0, y0 = 0, t0 = 0, ok = false;
     el.addEventListener("touchstart", (e) => {
       const t = e.touches[0];
-      ok = e.touches.length === 1 && !(e.target as HTMLElement).closest(".mf-chips, input, .mf-chart-wrap");
+      ok = e.touches.length === 1 && !(e.target as HTMLElement).closest(".mf-chips, input, textarea, .mf-chart-wrap");
       x0 = t.clientX; y0 = t.clientY; t0 = Date.now();
     }, { passive: true });
     el.addEventListener("touchend", (e) => {
-      if (!ok) return;
+      if (!ok || this.tab === "loans" || this.tab === "notes") return;
       const t = e.changedTouches[0];
       const dx = t.clientX - x0, dy = t.clientY - y0;
       if (Math.abs(dx) > 70 && Math.abs(dy) < 45 && Date.now() - t0 < 600) this.step(dx < 0 ? 1 : -1);
@@ -225,7 +266,7 @@ export class FinanceView extends ItemView {
 
   // ---------- overview ----------
   private renderOverview(txs: Transaction[]): void {
-    const cur = this.plugin.settings.currencyLabel;
+    const cur = this.cur;
     const el = this.scrollEl;
     const s = summarize(txs);
 
@@ -251,8 +292,7 @@ export class FinanceView extends ItemView {
     cell("Баланс", `${bal > 0 ? "+" : ""}${money(bal, cur)}`, bal >= 0 ? "is-income" : "is-spend");
     cell("Операцій", String(s.count));
 
-    // Monthly chart over all data, current month highlighted.
-    const all = summarize(this.data!.transactions);
+    const all = summarize(this.txs);
     if (all.monthly.length > 1) {
       const card = this.card("По місяцях");
       this.monthlyChart(card, all);
@@ -260,20 +300,12 @@ export class FinanceView extends ItemView {
 
     const cats = this.card("Категорії");
     if (!s.categories.length) cats.createDiv({ cls: "mf-muted", text: "Немає витрат за цей період." });
-    const maxCat = s.categories[0]?.total || 1;
-    for (const c of s.categories) {
-      const row = cats.createDiv("mf-cat");
-      row.onclick = () => { this.category = c.code; this.direction = ""; this.tab = "transactions"; this.shown = PAGE; this.render(); this.scrollEl.scrollTop = 0; };
-      this.avatar(row, c.code, c.name);
-      const mid = row.createDiv("mf-cat-mid");
-      const top = mid.createDiv("mf-cat-top");
-      top.createDiv({ cls: "mf-cat-name", text: c.name });
-      top.createDiv({ cls: "mf-num", text: money(c.total, cur) });
-      const track = mid.createDiv("mf-track");
-      const fill = track.createDiv("mf-fill");
-      fill.style.width = `${(c.total / maxCat) * 100}%`;
-      fill.style.background = categoryColor(c.code);
-      mid.createDiv({ cls: "mf-muted mf-small", text: `${s.spend ? Math.round((c.total / s.spend) * 100) : 0}% · ${c.count} опер.` });
+    else cats.createDiv({ cls: "mf-muted mf-small mf-card-hint", text: "Торкніться категорії, щоб побачити, з чого вона складається." });
+    this.categoryRows(cats, s.categories, s.spend, (code) => { this.detailCat = code; this.render(); this.scrollEl.scrollTop = 0; });
+
+    if (s.incomeCategories.length) {
+      const inc = this.card("Надходження");
+      this.categoryRows(inc, s.incomeCategories, s.income, (code) => this.openTransactions(code, "credit"));
     }
 
     if (s.card + s.cash > 0) {
@@ -285,18 +317,125 @@ export class FinanceView extends ItemView {
       const recent = this.card("Останні операції");
       this.txList(recent, txs.slice(0, 5), cur, false);
       const more = recent.createEl("button", { cls: "mf-link-btn", text: "Усі операції →" });
-      more.onclick = () => { this.category = ""; this.tab = "transactions"; this.render(); this.scrollEl.scrollTop = 0; };
+      more.onclick = () => this.openTransactions("", "");
     }
+  }
+
+  private categoryRows(el: HTMLElement, list: Summary["categories"], total: number, onTap: (code: string) => void): void {
+    const max = list[0]?.total || 1;
+    for (const c of list) {
+      const row = el.createDiv("mf-cat");
+      row.onclick = () => onTap(c.code);
+      this.avatar(row, c.code, c.name);
+      const mid = row.createDiv("mf-cat-mid");
+      const top = mid.createDiv("mf-cat-top");
+      top.createDiv({ cls: "mf-cat-name", text: c.name });
+      top.createDiv({ cls: "mf-num", text: money(c.total, this.cur) });
+      const track = mid.createDiv("mf-track");
+      const fill = track.createDiv("mf-fill");
+      fill.style.width = `${(c.total / max) * 100}%`;
+      fill.style.background = categoryColor(c.code);
+      mid.createDiv({ cls: "mf-muted mf-small", text: `${total ? Math.round((c.total / total) * 100) : 0}% · ${c.count} опер.` });
+    }
+  }
+
+  private openTransactions(category: string, direction: string): void {
+    this.category = category; this.direction = direction; this.tab = "transactions"; this.shown = PAGE;
+    this.render(); this.scrollEl.scrollTop = 0;
+  }
+
+  // ---------- category drill-down ----------
+  private renderCategoryDetail(txs: Transaction[], code: string): void {
+    const cur = this.cur;
+    const el = this.scrollEl;
+    const d = categoryDetail(txs, code);
+    const spend = summarize(txs).spend;
+
+    const back = el.createEl("button", { cls: "mf-back" });
+    setIcon(back.createSpan(), "arrow-left");
+    back.createSpan({ text: "Усі категорії" });
+    back.onclick = () => { this.detailCat = ""; this.render(); this.scrollEl.scrollTop = 0; };
+
+    const hero = el.createDiv("mf-card mf-hero");
+    const ttl = hero.createDiv("mf-detail-title");
+    this.avatar(ttl, code, codeName(code));
+    ttl.createDiv({ cls: "mf-hero-label", text: codeName(code) });
+    hero.createDiv({ cls: "mf-hero-value", text: money(d.total, cur) });
+    hero.createDiv({ cls: "mf-muted mf-small", text: `${spend ? Math.round((d.total / spend) * 100) : 0}% усіх витрат · ${this.periodLabel().toLowerCase()}` });
+
+    // Coverage: what part of the category is explained by receipt lines.
+    const cov = this.card("Покриття чеками");
+    const detailed = r2(d.total - d.noDetail.total);
+    const pct = d.total ? Math.round((detailed / d.total) * 100) : 0;
+    const bar = cov.createDiv("mf-split");
+    const fill = bar.createDiv("mf-split-card"); fill.style.width = `${pct}%`; fill.style.background = categoryColor(code);
+    cov.createDiv({ cls: "mf-small", text: `Деталізовано ${pct}% · ${money(detailed, cur)}` });
+    if (d.noDetail.txs.length) {
+      const n = d.noDetail.txs.length;
+      const npct = d.total ? Math.round((d.noDetail.total / d.total) * 100) : 0;
+      const box = cov.createEl("details", { cls: "mf-cover" });
+      const sm = box.createEl("summary");
+      setIcon(sm.createSpan("mf-issue-icon"), "file-question");
+      const txt = sm.createDiv("mf-cover-text");
+      txt.createDiv({ text: `Без чека: ${n} ${plural(n, "покупка", "покупки", "покупок")} · ${money(d.noDetail.total, cur)} · ${npct}% суми категорії` });
+      txt.createDiv({ cls: "mf-muted mf-small", text: "Не потрапили в деталізацію" + (d.noDetail.noItems ? ` (з них ${d.noDetail.noItems} з чеком без позицій)` : "") + "." });
+      let drawn = false;
+      box.addEventListener("toggle", () => { if (box.open && !drawn) { drawn = true; this.txList(box, d.noDetail.txs, cur, false); } });
+    } else cov.createDiv({ cls: "mf-muted mf-small", text: "Усі покупки цієї категорії мають позиції з чеків." });
+    if (Math.abs(d.diff) >= 0.01) {
+      const box = cov.createEl("details", { cls: "mf-cover" });
+      const sm = box.createEl("summary");
+      setIcon(sm.createSpan("mf-issue-icon"), "percent");
+      const txt = sm.createDiv("mf-cover-text");
+      txt.createDiv({ text: `Інше / знижки: ${d.diff > 0 ? "+" : "−"}${money(Math.abs(d.diff), cur)}` });
+      txt.createDiv({ cls: "mf-muted mf-small", text: "Різниця між сумою позицій і сумою чека: знижки, кауція, округлення." });
+      let drawn = false;
+      box.addEventListener("toggle", () => { if (box.open && !drawn) { drawn = true; this.txList(box, d.diffTxs, cur, false); } });
+    }
+
+    if (d.groups.length) {
+      const list = this.card(code === "groceries" || code === "dining" || code === "alcohol" ? "З чого складається" : "Позиції з чеків");
+      const max = d.groups[0].total || 1;
+      for (const g of d.groups) {
+        const box = list.createEl("details", { cls: "mf-sub" });
+        const row = box.createEl("summary", { cls: "mf-cat" });
+        const mid = row.createDiv("mf-cat-mid");
+        const top = mid.createDiv("mf-cat-top");
+        top.createDiv({ cls: "mf-cat-name", text: g.name });
+        top.createDiv({ cls: "mf-num", text: money(g.total, cur) });
+        const track = mid.createDiv("mf-track");
+        const f = track.createDiv("mf-fill"); f.style.width = `${(g.total / max) * 100}%`; f.style.background = categoryColor(code);
+        const share = detailed ? Math.round((g.total / detailed) * 100) : 0;
+        mid.createDiv({ cls: "mf-muted mf-small", text: `${share}% деталізованого · ${g.items.length} поз.` });
+        let drawn = false;
+        box.addEventListener("toggle", () => {
+          if (!box.open || drawn) return;
+          drawn = true;
+          const ul = box.createDiv("mf-items");
+          for (const it of [...g.items].sort((a, b) => (a.tx.date < b.tx.date ? 1 : -1))) {
+            const r = ul.createDiv("mf-item");
+            const l = r.createDiv("mf-item-mid");
+            l.createDiv({ cls: "mf-item-name", text: it.item.n + (it.item.q ? ` × ${it.item.q}${it.item.u ? " " + it.item.u : ""}` : "") });
+            l.createDiv({ cls: "mf-muted mf-small", text: `${it.tx.date.slice(8)}.${it.tx.date.slice(5, 7)} · ${it.tx.merchant || "—"}` });
+            r.createDiv({ cls: "mf-num", text: money(it.amount, cur) });
+            if (it.tx.receiptUrl) this.receiptButton(r, it.tx.receiptUrl, true);
+          }
+        });
+      }
+    }
+
+    const all = el.createEl("button", { cls: "mf-link-btn", text: "Усі операції категорії →" });
+    all.onclick = () => { this.detailCat = ""; this.openTransactions(code, "debit"); };
   }
 
   // ---------- transactions ----------
   private renderTransactions(all: Transaction[]): void {
-    const cur = this.plugin.settings.currencyLabel;
+    const cur = this.cur;
     const el = this.scrollEl;
     const tools = el.createDiv("mf-tools");
     const searchWrap = tools.createDiv("mf-search");
     setIcon(searchWrap.createSpan("mf-search-icon"), "search");
-    const q = searchWrap.createEl("input", { type: "search", placeholder: "Магазин, сума, нотатка…", value: this.search });
+    const q = searchWrap.createEl("input", { type: "search", placeholder: "Магазин, сума, нотатка, позиція…", value: this.search });
     const chips = tools.createDiv("mf-chips");
     const list = el.createDiv();
 
@@ -311,8 +450,9 @@ export class FinanceView extends ItemView {
       chip("Усі", !this.category && !this.direction, () => { this.category = ""; this.direction = ""; });
       chip("Витрати", this.direction === "debit", () => { this.direction = this.direction === "debit" ? "" : "debit"; });
       chip("Надходження", this.direction === "credit", () => { this.direction = this.direction === "credit" ? "" : "credit"; });
-      const cats = summarize(all).categories;
-      for (const c of cats) chip(c.name, this.category === c.code, () => { this.category = this.category === c.code ? "" : c.code; }, categoryColor(c.code));
+      const s = summarize(all);
+      const seen = new Set<string>();
+      for (const c of [...s.categories, ...s.incomeCategories].filter((x) => !seen.has(x.code) && seen.add(x.code))) chip(c.name, this.category === c.code, () => { this.category = this.category === c.code ? "" : c.code; }, categoryColor(c.code));
       chips.querySelector(".is-active:not(:first-child)")?.scrollIntoView({ inline: "center", block: "nearest" });
     };
     drawChips();
@@ -325,9 +465,9 @@ export class FinanceView extends ItemView {
     el.empty();
     const q = this.search.trim().toLowerCase().replace(",", ".");
     const txs = all.filter((t) =>
-      (!this.category || (t.category || "other") === this.category)
+      (!this.category || (t.direction === "credit" ? (t.category || "other") === this.category : inCategory(t, this.category) || (t.category || "other") === this.category))
       && (!this.direction || t.direction === this.direction)
-      && (!q || `${t.merchant} ${t.description} ${t.notes} ${t.amount}`.toLowerCase().includes(q)));
+      && (!q || `${t.merchant} ${t.description} ${t.notes} ${t.amount} ${(t.items ?? []).map((i) => i.n).join(" ")}`.toLowerCase().includes(q)));
     const s = summarize(txs);
     const sum = el.createDiv("mf-list-sum");
     sum.createSpan({ text: `${txs.length} операцій` });
@@ -341,18 +481,214 @@ export class FinanceView extends ItemView {
     }
   }
 
-  // ---------- reconcile ----------
-  private renderReconcile(txs: Transaction[]): void {
-    const cur = this.plugin.settings.currencyLabel;
+  // ---------- plan ----------
+  private renderPlan(): void {
     const el = this.scrollEl;
-    const issues = reconcile(txs, this.plugin.settings.bigAmount);
+    const month = this.anchor;
+    const raw = this.data!.transactions; // plan is kept in PLN, so the facts are too
+    const mtx = raw.filter((t) => t.date.startsWith(month) && !t.excluded);
+    const p1 = prevMonth(month), p2 = prevMonth(p1);
+    const fact = (kind: "income" | "expense", code: string, m: string) => {
+      let v = 0;
+      for (const t of raw) {
+        if (!t.date.startsWith(m) || t.excluded) continue;
+        if (kind === "income" && t.direction === "credit" && (t.category || "other") === code) v += t.amount;
+        if (kind === "expense" && t.direction === "debit") for (const [c, a] of categoryShares(t)) if (c === code) v += a;
+      }
+      return r2(v);
+    };
+    const items = this.local.plan.filter((p) => p.month === month);
+    const inc = items.filter((p) => p.kind === "income"), exp = items.filter((p) => p.kind === "expense");
+    const sumP = (a: PlanItem[]) => r2(a.reduce((s, p) => s + p.amount, 0));
+    const sumF = (a: PlanItem[], kind: "income" | "expense") => r2([...new Set(a.map((p) => p.category))].reduce((s, c) => s + fact(kind, c, month), 0));
+    const hasFacts = mtx.length > 0;
+
+    const hero = el.createDiv("mf-card mf-hero");
+    hero.createDiv({ cls: "mf-hero-label", text: `План на ${this.periodLabel().toLowerCase()}` });
+    const left = r2(sumP(inc) - sumP(exp));
+    hero.createDiv({ cls: "mf-hero-value " + (left >= 0 ? "is-income" : "is-spend"), text: `${left >= 0 ? "+" : ""}${money(left, "zł")}` });
+    hero.createDiv({ cls: "mf-muted mf-small", text: "Залишок за планом: доходи мінус витрати. План ведеться в злотих." });
+    const sub = hero.createDiv("mf-hero-sub");
+    const cell = (label: string, value: string, cls = "") => { const c = sub.createDiv("mf-hero-cell"); c.createDiv({ cls: "mf-muted mf-small", text: label }); c.createDiv({ cls: "mf-num " + cls, text: value }); };
+    cell("Доходи", money(sumP(inc), "zł"), "is-income");
+    cell("Витрати", money(sumP(exp), "zł"), "is-spend");
+    if (hasFacts) cell("Факт витрат", money(sumF(exp, "expense"), "zł"));
+
+    const section = (title: string, list: PlanItem[], kind: "income" | "expense") => {
+      const card = this.card(title);
+      if (!list.length) card.createDiv({ cls: "mf-muted mf-small", text: "Ще нічого не заплановано." });
+      for (const p of list) {
+        const row = card.createDiv("mf-plan-row");
+        this.avatar(row, p.category || "other", p.name);
+        const mid = row.createDiv("mf-cat-mid");
+        const top = mid.createDiv("mf-cat-top");
+        top.createDiv({ cls: "mf-cat-name", text: p.name || codeName(p.category) });
+        top.createDiv({ cls: "mf-num", text: money(p.amount, "zł") });
+        const f = fact(kind, p.category, month);
+        if (hasFacts) {
+          const track = mid.createDiv("mf-track");
+          const fill = track.createDiv("mf-fill");
+          const ratio = p.amount ? f / p.amount : 0;
+          fill.style.width = `${Math.min(100, ratio * 100)}%`;
+          fill.style.background = kind === "expense" && ratio > 1 ? "var(--mf-spend)" : kind === "income" ? "var(--mf-income)" : categoryColor(p.category);
+          mid.createDiv({ cls: "mf-muted mf-small", text: `факт ${money(f, "zł")} · ${Math.round(ratio * 100)}%${kind === "expense" && f > p.amount ? ` · понад план на ${money(r2(f - p.amount), "zł")}` : ""}` });
+        }
+        const h1 = fact(kind, p.category, p1), h2 = fact(kind, p.category, p2);
+        if (h1 || h2) mid.createDiv({ cls: "mf-muted mf-small", text: `${MONTHS_UA[Number(p1.slice(5)) - 1]}: ${money(h1, "zł")} · ${MONTHS_UA[Number(p2.slice(5)) - 1]}: ${money(h2, "zł")}` });
+        row.onclick = () => this.editPlan(p);
+      }
+      const add = card.createEl("button", { cls: "mf-link-btn", text: kind === "income" ? "+ Дохід" : "+ Витрата" });
+      add.onclick = () => this.editPlan({ id: "", kind, name: "", category: kind === "income" ? "income_main" : "groceries", amount: 0, month });
+    };
+    section("Доходи", inc, "income");
+    section("Витрати", exp, "expense");
+
+    // Spending categories this month that have no plan line.
+    if (hasFacts) {
+      const planned = new Set(exp.map((p) => p.category));
+      const s = summarize(mtx);
+      const extra = s.categories.filter((c) => !planned.has(c.code) && c.total >= 1);
+      if (extra.length) {
+        const card = this.card("Витрати поза планом");
+        for (const c of extra) {
+          const r = card.createDiv("mf-plan-extra");
+          r.createSpan({ text: c.name });
+          r.createSpan({ cls: "mf-num", text: money(c.total, "zł") });
+          r.onclick = () => this.editPlan({ id: "", kind: "expense", name: c.name, category: c.code, amount: Math.ceil(c.total), month });
+        }
+        card.createDiv({ cls: "mf-muted mf-small", text: "Торкніться, щоб додати в план." });
+      }
+    }
+
+    const prev = this.local.plan.filter((p) => p.month === p1);
+    if (!items.length && prev.length) {
+      const b = el.createEl("button", { cls: "mod-cta mf-wide", text: `Скопіювати план з ${MONTHS_FULL[Number(p1.slice(5)) - 1].toLowerCase()} (${prev.length})` });
+      b.onclick = async () => {
+        const copy = prev.map((p) => ({ ...p, id: newId("p"), month }));
+        this.local.plan.push(...copy);
+        await this.saveLocal();
+      };
+    }
+    el.createDiv({ cls: "mf-muted mf-small mf-foot-note", text: "План і нотатки зберігаються у файлі сховища й синхронізуються між пристроями. У Google Sheet вони потрапляють під час /finance-check." });
+  }
+
+  private editPlan(p: PlanItem): void {
+    const cats = Object.keys(CATEGORY_NAMES).concat((this.data?.categoryDefs ?? []).map((c) => c.code)).filter((c, i, a) => a.indexOf(c) === i);
+    new PlanModal(this.app, p, cats, async (res) => {
+      if (res === "delete") this.local.plan = this.local.plan.filter((x) => x.id !== p.id);
+      else if (p.id) this.local.plan = this.local.plan.map((x) => (x.id === p.id ? { ...res, id: p.id } : x));
+      else this.local.plan.push({ ...res, id: newId("p") });
+      await this.saveLocal();
+    }).open();
+  }
+
+  private async saveLocal(): Promise<void> {
+    await this.plugin.saveLocal(this.local);
+    this.render();
+  }
+
+  // ---------- loans ----------
+  private renderLoans(): void {
+    const el = this.scrollEl;
+    const loans = this.data?.loans ?? [];
+    if (!loans.length) { el.createDiv({ cls: "mf-empty-inline", text: "Боргів немає." }); return; }
+    const today = new Date().toISOString().slice(0, 10);
+    const conv = (l: { amount: number; currency: string }) => this.conv.convert(l.amount, l.currency, today, this.data!.fx);
+    const active = loans.filter(loanActive), closed = loans.filter((l) => !loanActive(l));
+    const owe = r2(active.filter((l) => loanSign(l) < 0).reduce((s, l) => s + conv(l), 0));
+    const owed = r2(active.filter((l) => loanSign(l) > 0).reduce((s, l) => s + conv(l), 0));
+
+    const hero = el.createDiv("mf-card mf-hero");
+    const sub = hero.createDiv("mf-hero-sub");
+    const cell = (label: string, value: string, cls = "") => { const c = sub.createDiv("mf-hero-cell"); c.createDiv({ cls: "mf-muted mf-small", text: label }); c.createDiv({ cls: "mf-num " + cls, text: value }); };
+    cell("Я винен", money(owe, this.cur), "is-spend");
+    cell("Мені винні", money(owed, this.cur), "is-income");
+    cell("Активних", String(active.length));
+    if (this.conv.target !== "PLN" || active.some((l) => l.currency !== "PLN")) hero.createDiv({ cls: "mf-muted mf-small", text: `У ${this.conv.target} за останнім курсом НБП.` });
+
+    const draw = (title: string, list: typeof loans) => {
+      if (!list.length) return;
+      const card = this.card(title);
+      for (const l of list) {
+        const box = card.createEl("details", { cls: "mf-loan" });
+        const sm = box.createEl("summary", { cls: "mf-cat" });
+        this.avatar(sm, "family", l.person);
+        const mid = sm.createDiv("mf-cat-mid");
+        const top = mid.createDiv("mf-cat-top");
+        top.createDiv({ cls: "mf-cat-name", text: l.person });
+        top.createDiv({ cls: "mf-num " + (loanSign(l) < 0 ? "is-spend" : "is-income"), text: money(l.amount, l.currency === "PLN" ? "zł" : l.currency) });
+        mid.createDiv({ cls: "mf-muted mf-small", text: `${loanSign(l) < 0 ? "я винен" : "мені винні"} · з ${l.dateGiven}${l.dateReturned ? ` · повернено ${l.dateReturned}` : ""}${l.currency !== this.conv.target ? ` · ≈ ${money(r2(conv(l)), this.cur)}` : ""}` });
+        if (l.notes) box.createDiv({ cls: "mf-muted mf-small mf-loan-notes", text: l.notes });
+      }
+    };
+    draw("Активні", active);
+    draw("Закриті", closed);
+  }
+
+  // ---------- notes ----------
+  private renderNotes(): void {
+    const el = this.scrollEl;
+    const add = el.createEl("button", { cls: "mod-cta mf-wide", text: "+ Нотатка" });
+    add.onclick = () => this.editNote({ id: "", text: "", created: "", done: false });
+    const notes = [...this.local.notes].sort((a, b) => Number(a.done) - Number(b.done) || (a.created < b.created ? 1 : -1));
+    if (!notes.length) el.createDiv({ cls: "mf-empty-inline", text: "Нотаток немає." });
+    const open = notes.filter((n) => !n.done), done = notes.filter((n) => n.done);
+    const draw = (title: string, list: Note[]) => {
+      if (!list.length) return;
+      const card = this.card(`${title} · ${list.length}`);
+      for (const n of list) {
+        const row = card.createDiv("mf-note" + (n.done ? " is-done" : ""));
+        const cb = row.createEl("input", { type: "checkbox" });
+        cb.checked = n.done;
+        cb.onclick = (e) => e.stopPropagation();
+        cb.onchange = async () => { n.done = cb.checked; await this.saveLocal(); };
+        const mid = row.createDiv("mf-note-mid");
+        mid.createDiv({ cls: "mf-note-text", text: n.text });
+        if (n.created) mid.createDiv({ cls: "mf-muted mf-small", text: n.created });
+        mid.onclick = () => this.editNote(n);
+      }
+    };
+    draw("Відкриті", open);
+    draw("Виконані", done);
+    el.createDiv({ cls: "mf-muted mf-small mf-foot-note", text: "Нотатки зберігаються у файлі сховища. Відкриті нотатки /finance-check читає як інструкції." });
+  }
+
+  private editNote(n: Note): void {
+    new NoteModal(this.app, n, async (res) => {
+      if (res === "delete") this.local.notes = this.local.notes.filter((x) => x.id !== n.id);
+      else if (n.id) this.local.notes = this.local.notes.map((x) => (x.id === n.id ? { ...x, text: res.text, done: res.done } : x));
+      else this.local.notes.push({ id: newId("n"), text: res.text, done: res.done, created: new Date().toISOString().slice(0, 16).replace("T", " ") });
+      await this.saveLocal();
+    }).open();
+  }
+
+  // ---------- review ----------
+  private renderReview(txs: Transaction[]): void {
+    const cur = this.cur;
+    const el = this.scrollEl;
+    const issues = reconcile(txs, this.plugin.settings.bigAmount, cur);
     const s = summarize(txs);
-    const debits = txs.filter((t) => t.direction === "debit");
+    const debits = txs.filter((t) => t.direction === "debit" && !t.excluded);
     const stats = el.createDiv("mf-stats");
     const stat = (n: string, label: string) => { const d = stats.createDiv("mf-stat"); d.createDiv({ cls: "mf-stat-n", text: n }); d.createDiv({ cls: "mf-muted mf-small", text: label }); };
-    stat(`${txs.length ? Math.round((s.withReceipt / txs.length) * 100) : 0}%`, "з чеком");
+    stat(`${debits.length ? Math.round((debits.filter((t) => t.hasReceipt).length / debits.length) * 100) : 0}%`, "покупок з чеком");
     stat(String(debits.filter((t) => t.payment === "cash").length), "готівкою");
     stat(String(issues.reduce((a, i) => a + Math.max(1, i.txs.length), 0)), "до перевірки");
+
+    const queue = (this.data?.review ?? []).filter((r) => { const [a, b] = this.range(); return r.date >= a && r.date <= b; });
+    if (queue.length) {
+      const card = this.card(`Чеки на перевірку · ${queue.length}`);
+      card.createDiv({ cls: "mf-muted mf-small mf-card-hint", text: "Розпізнані чеки, які ще не зіставлені з операцією. Підтвердити можна на сайті або через /finance-check." });
+      for (const r of queue) {
+        const row = card.createDiv("mf-item");
+        const l = row.createDiv("mf-item-mid");
+        l.createDiv({ cls: "mf-item-name", text: r.merchant || "Чек" });
+        l.createDiv({ cls: "mf-muted mf-small", text: `${r.date}${r.payment ? " · " + (r.payment === "cash" ? "готівка" : r.payment === "card" ? "картка" : r.payment) : ""}${r.items ? ` · ${r.items} поз.` : ""}` });
+        row.createDiv({ cls: "mf-num", text: money(r.total, r.currency === "PLN" ? "zł" : r.currency) });
+        if (r.url) this.receiptButton(row, r.url, true);
+      }
+    }
+    void s;
 
     if (!issues.length) { el.createDiv({ cls: "mf-card mf-ok", text: "Розбіжностей не знайдено ✓" }); return; }
     const icons: Record<string, string> = { duplicate: "copy", "cash-card": "banknote", "orphan-receipt": "receipt", "no-receipt": "file-question", other: "tag", category: "tag", gap: "calendar-x" };
@@ -378,10 +714,18 @@ export class FinanceView extends ItemView {
 
   private avatar(parent: HTMLElement, code: string, name: string): void {
     const a = parent.createDiv({ cls: "mf-avatar", attr: { "aria-label": name } });
-    const icon = CATEGORY_ICONS[code];
+    const icon = CATEGORY_ICONS[code] || (code.startsWith("income") ? "trending-up" : "");
     if (icon) setIcon(a, icon);
     if (!a.firstChild) a.setText((name || "?").charAt(0).toUpperCase());
     a.style.setProperty("--mf-c", categoryColor(code));
+  }
+
+  /** Opens the receipt photo in Google Drive (external browser on phones). Nothing is saved in the vault. */
+  private receiptButton(parent: HTMLElement, url: string, compact = false): void {
+    const b = parent.createEl("button", { cls: compact ? "mf-icon-btn" : "mf-chip mf-receipt-btn", attr: { "aria-label": "Відкрити чек у Google Drive" } });
+    setIcon(b.createSpan(), "receipt");
+    if (!compact) b.createSpan({ text: "Відкрити чек" });
+    b.onclick = (e) => { e.stopPropagation(); window.open(url, "_blank"); };
   }
 
   private txList(el: HTMLElement, txs: Transaction[], cur: string, grouped: boolean): void {
@@ -393,27 +737,39 @@ export class FinanceView extends ItemView {
         const d = new Date(`${t.date}T12:00:00`);
         const h = list.createDiv("mf-day");
         h.createSpan({ text: `${WEEKDAYS[d.getDay()]}, ${d.getDate()} ${MONTHS_UA[d.getMonth()]}${t.date.slice(0, 4) !== String(new Date().getFullYear()) ? " " + t.date.slice(0, 4) : ""}` });
-        const dayTotal = txs.filter((x) => x.date === t.date && x.direction === "debit").reduce((a, x) => a + x.amount, 0);
+        const dayTotal = txs.filter((x) => x.date === t.date && x.direction === "debit" && !x.excluded).reduce((a, x) => a + x.amount, 0);
         if (dayTotal) h.createSpan({ cls: "mf-muted mf-day-sum", text: `−${money(r2(dayTotal), cur)}` });
       }
-      const row = list.createDiv("mf-tx");
+      const row = list.createDiv("mf-tx" + (t.excluded ? " is-excluded" : ""));
       this.avatar(row, t.category || "other", categoryName(t));
       const mid = row.createDiv("mf-tx-mid");
       mid.createDiv({ cls: "mf-tx-name", text: t.merchant || t.description || "—" });
       const sub = mid.createDiv({ cls: "mf-muted mf-small mf-tx-sub" });
       sub.createSpan({ text: grouped ? categoryName(t) : `${t.date.slice(8)}.${t.date.slice(5, 7)} · ${categoryName(t)}` });
       if (t.payment === "cash") sub.createSpan({ cls: "mf-tag", text: "готівка" });
+      if (t.orig) sub.createSpan({ cls: "mf-tag", text: t.orig.currency });
+      if (t.excluded) sub.createSpan({ cls: "mf-tag", text: EXCLUDED_LABEL[t.excluded] || t.excluded });
       if (t.hasReceipt) setIcon(sub.createSpan({ cls: "mf-receipt", attr: { "aria-label": "Є чек" } }), "receipt");
       row.createDiv({ cls: "mf-tx-amt " + (t.direction === "credit" ? "is-income" : ""), text: `${t.direction === "credit" ? "+" : "−"}${money(t.amount, cur)}` });
       row.onclick = (e) => {
-        if ((e.target as HTMLElement).closest("a")) return;
+        if ((e.target as HTMLElement).closest("a, button")) return;
         if (row.hasClass("is-open")) { row.removeClass("is-open"); row.querySelector(".mf-tx-details")?.remove(); return; }
         row.addClass("is-open");
         const det = row.createDiv("mf-tx-details");
-        det.createDiv({ text: t.date });
+        det.createDiv({ text: t.date + (t.account && t.account !== "cash" ? ` · ${accountLabel(t.account)}` : "") });
+        if (t.orig) det.createDiv({ text: `${money(t.orig.amount, t.orig.currency)}${t.orig.fx ? ` · курс ${t.orig.fx}` : ""}` });
+        if (t.excluded) det.createDiv({ cls: "mf-muted", text: "Не враховується у витратах і доходах." });
         if (t.description) det.createDiv({ text: t.description });
         if (t.notes) det.createDiv({ cls: "mf-muted", text: t.notes });
-        if (t.receiptUrl) det.createEl("a", { text: "Відкрити чек", href: t.receiptUrl });
+        if (t.items?.length) {
+          const its = det.createDiv("mf-items");
+          for (const i of t.items) {
+            const r = its.createDiv("mf-item");
+            r.createDiv({ cls: "mf-item-name", text: i.n + (i.q ? ` × ${i.q}${i.u ? " " + i.u : ""}` : "") });
+            r.createDiv({ cls: "mf-num", text: money(i.t, cur) });
+          }
+        }
+        if (t.receiptUrl) this.receiptButton(det, t.receiptUrl);
       };
     }
   }
@@ -474,4 +830,19 @@ export class FinanceView extends ItemView {
     li("mf-bg-spend", "Витрати"); li("mf-bg-income", "Надходження");
     leg.createDiv({ cls: "mf-muted mf-small mf-legend-hint", text: "Торкніться місяця" });
   }
+}
+
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10, m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
+}
+function accountLabel(a: string): string {
+  if (/^mono_/.test(a)) return `Monobank ${a.slice(5)}`;
+  if (/^PL\d{26}$/.test(a)) return `рахунок …${a.slice(-4)}`;
+  return a;
+}
+function newId(prefix: string): string {
+  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
 }
